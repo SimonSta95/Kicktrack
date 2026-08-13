@@ -1,0 +1,222 @@
+from __future__ import annotations
+
+from dataclasses import dataclass
+from datetime import date, timedelta
+from statistics import median
+from typing import Iterable
+
+
+@dataclass(frozen=True)
+class Prediction:
+    delta: int | None
+    expected_value: int | None
+    low_delta: int | None
+    high_delta: int | None
+    confidence: str
+    sample_count: int
+    history_days: int
+    method: str = "24h persistence + historical calibration"
+
+    def as_dict(self) -> dict:
+        return {
+            "delta": self.delta,
+            "expected_value": self.expected_value,
+            "low_delta": self.low_delta,
+            "high_delta": self.high_delta,
+            "confidence": self.confidence,
+            "sample_count": self.sample_count,
+            "history_days": self.history_days,
+            "method": self.method,
+        }
+
+
+def _iso_day(value) -> date | None:
+    try:
+        return date.fromisoformat(str(value)[:10])
+    except (TypeError, ValueError):
+        return None
+
+
+def _daily_series(rows: Iterable[dict]) -> dict[str, list[tuple[date, int]]]:
+    by_player: dict[str, dict[date, int]] = {}
+    for row in rows or []:
+        player_id = str(row.get("player_id") or "")
+        day = _iso_day(row.get("snapshot_date"))
+        try:
+            value = int(row.get("value") or 0)
+        except (TypeError, ValueError):
+            continue
+        if not player_id or day is None or value <= 0:
+            continue
+        by_player.setdefault(player_id, {})[day] = value
+    return {pid: sorted(values.items()) for pid, values in by_player.items()}
+
+
+def _historical_samples(series: dict[str, list[tuple[date, int]]]) -> list[dict]:
+    samples: list[dict] = []
+    # The newest stored calendar day may have been captured *before* the 22:00
+    # refresh and therefore still contain yesterday's value. Never use a sample
+    # whose target is that newest global day. We intentionally lag calibration
+    # by one day rather than training on an incomplete pseudo-zero move.
+    newest_day = max((day for points in series.values() for day, _ in points), default=None)
+    for player_id, points in series.items():
+        values = dict(points)
+        for day, current in points:
+            previous_day = day - timedelta(days=1)
+            next_day = day + timedelta(days=1)
+            if previous_day not in values or next_day not in values:
+                continue
+            if newest_day is not None and next_day == newest_day:
+                continue
+            previous = values[previous_day]
+            d1 = current - previous
+            target = values[next_day] - current
+            samples.append(
+                {
+                    "player_id": player_id,
+                    "market_value": current,
+                    "d1": d1,
+                    "target": target,
+                    "error": target - d1,
+                }
+            )
+    return samples
+
+
+def _percentile(values: list[int], q: float) -> int:
+    if not values:
+        return 0
+    ordered = sorted(int(v) for v in values)
+    if len(ordered) == 1:
+        return ordered[0]
+    pos = max(0.0, min(1.0, q)) * (len(ordered) - 1)
+    lo = int(pos)
+    hi = min(lo + 1, len(ordered) - 1)
+    frac = pos - lo
+    return int(round(ordered[lo] * (1 - frac) + ordered[hi] * frac))
+
+
+def build_predictions(
+    rows: Iterable[dict],
+    current_values: dict[str, int] | None = None,
+    current_deltas: dict[str, int] | None = None,
+) -> dict[str, dict]:
+    """Predict the next daily Kickbase market-value refresh.
+
+    Kickbase market-value changes in the supplied history are strongly persistent
+    from one refresh to the next.  The model deliberately uses that robust signal
+    instead of pretending to know an exact future price:
+
+    * point forecast = latest 24h change, lightly bias-corrected from comparable
+      historical observations;
+    * interval = empirical 80% absolute error of comparable historical cases;
+    * confidence = history depth + recent direction consistency + interval width.
+
+    No external ML package is required and every output remains explainable.
+    """
+    series = _daily_series(rows)
+    samples = _historical_samples(series)
+    current_values = {str(k): int(v) for k, v in (current_values or {}).items() if v is not None}
+    current_deltas = {str(k): int(v) for k, v in (current_deltas or {}).items() if v is not None}
+    result: dict[str, dict] = {}
+
+    for player_id, points in series.items():
+        if not points:
+            continue
+        latest_day, latest_stored = points[-1]
+        current = int(current_values.get(player_id, latest_stored))
+        values = dict(points)
+
+        # Before the 22:00 refresh today's persisted snapshot still contains the
+        # *previous* refresh value. Deriving the signal from today's/yesterday's
+        # rows therefore produces a false 0. Kickbase already exposes the live
+        # 24h change; use that as the authoritative next-refresh signal whenever
+        # available. The daily DB history is only the calibration/backtest base.
+        if player_id in current_deltas:
+            latest_delta = int(current_deltas[player_id])
+        else:
+            previous_day = latest_day - timedelta(days=1)
+            if previous_day in values:
+                latest_delta = current - int(values[previous_day])
+            elif len(points) >= 2:
+                latest_delta = current - int(points[-2][1])
+            else:
+                result[player_id] = Prediction(None, None, None, None, "UNSICHER", 0, len(points)).as_dict()
+                continue
+
+        # Comparable historical cases: same direction and broadly similar daily
+        # change magnitude.  Prefer a comparable market-value band, then relax it
+        # if that would leave too little evidence.
+        sign = 1 if latest_delta > 0 else (-1 if latest_delta < 0 else 0)
+        magnitude = max(abs(latest_delta), 1)
+        analogs = [
+            s for s in samples
+            if (1 if s["d1"] > 0 else (-1 if s["d1"] < 0 else 0)) == sign
+            and abs(s["d1"]) >= magnitude * 0.50
+            and abs(s["d1"]) <= magnitude * 1.50
+            and s["market_value"] >= current * 0.40
+            and s["market_value"] <= current * 2.50
+        ]
+        if len(analogs) < 20:
+            analogs = [
+                s for s in samples
+                if (1 if s["d1"] > 0 else (-1 if s["d1"] < 0 else 0)) == sign
+                and abs(s["d1"]) >= magnitude * 0.40
+                and abs(s["d1"]) <= magnitude * 1.80
+            ]
+
+        bias = int(round(median([s["error"] for s in analogs]))) if analogs else 0
+        # Calibration is intentionally weak. The persistence signal is the part
+        # that backtests well; the historical correction must never dominate it.
+        bias_cap = max(25_000, int(magnitude * 0.20))
+        bias = max(-bias_cap, min(bias_cap, bias))
+        prediction = int(round(latest_delta + bias))
+
+        abs_errors = [abs(int(s["error"])) for s in analogs]
+        radius = _percentile(abs_errors, 0.80) if abs_errors else max(75_000, int(magnitude * 0.60))
+        # Do not display a deceptively narrow range merely because a tiny sample
+        # happened to be homogeneous.
+        radius = max(25_000, radius)
+        low = prediction - radius
+        high = prediction + radius
+
+        # Recent direction consistency is a useful confidence signal without
+        # changing the point forecast itself.
+        recent_deltas: list[int] = []
+        for idx in range(len(points) - 1, 0, -1):
+            day, value = points[idx]
+            prev_day, prev_value = points[idx - 1]
+            if (day - prev_day).days != 1:
+                continue
+            recent_deltas.append(int(value) - int(prev_value))
+            if len(recent_deltas) >= 3:
+                break
+        same_direction = sum(
+            1 for value in recent_deltas
+            if (1 if value > 0 else (-1 if value < 0 else 0)) == sign
+        )
+        ratio = radius / max(abs(prediction), 50_000)
+        has_live_signal = player_id in current_deltas
+        if has_live_signal and len(points) >= 4 and len(analogs) >= 50 and same_direction >= 2 and ratio <= 0.75:
+            confidence = "HOCH"
+        elif has_live_signal and len(analogs) >= 20 and ratio <= 1.25:
+            # A trusted live 24h signal plus a broad historical analogue set is
+            # useful even if this particular player has only a short local
+            # history. Keep that at MITTEL, never HOCH without own trend depth.
+            confidence = "MITTEL"
+        elif len(points) >= 4 and len(analogs) >= 12 and ratio <= 1.50:
+            confidence = "MITTEL"
+        else:
+            confidence = "UNSICHER"
+
+        result[player_id] = Prediction(
+            delta=prediction,
+            expected_value=max(0, current + prediction),
+            low_delta=low,
+            high_delta=high,
+            confidence=confidence,
+            sample_count=len(analogs),
+            history_days=len(points),
+        ).as_dict()
+
+    return result

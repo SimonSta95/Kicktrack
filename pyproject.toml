@@ -1,0 +1,31 @@
+[project]
+name = "kicktrack"
+version = "0.31.1"
+description = "Desktop analytics companion for a personal Kickbase squad"
+requires-python = ">=3.11"
+dependencies = [
+    "PySide6>=6.7",
+    "httpx>=0.27",
+    "keyring>=25.0",
+    "tzdata>=2025.2",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "ruff>=0.6",
+]
+
+[tool.ruff]
+target-version = "py311"
+line-length = 100
+exclude = [".venv"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
+ignore = ["E501"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+addopts = "-q"

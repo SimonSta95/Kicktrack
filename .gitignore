@@ -1,0 +1,9 @@
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.vscode/
+.idea/
+manager_transfers.json
+debug/
