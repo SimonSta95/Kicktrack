@@ -315,3 +315,100 @@ def test_league_player_returns_foreign_player_stats(tmp_path):
     assert player["points_total"] == 321
     assert player["average_points"] == 64
     storage.close()
+
+
+def test_portrait_path_falls_back_to_bundled_asset(tmp_path, monkeypatch):
+    from app import storage as storage_module
+
+    storage = storage_module.Storage(tmp_path / "kicktrack.db")
+    bundled = tmp_path / "bundled.png"
+    bundled.write_bytes(b"portrait")
+    monkeypatch.setattr(storage_module, "bundled_portrait_path", lambda player_id: bundled if str(player_id) == "42" else None)
+
+    assert storage.portrait_path("42") == str(bundled)
+
+
+def test_portrait_path_prefers_existing_local_cache(tmp_path, monkeypatch):
+    from app import storage as storage_module
+
+    storage = storage_module.Storage(tmp_path / "kicktrack.db")
+    local = tmp_path / "local.png"
+    local.write_bytes(b"local")
+    bundled = tmp_path / "bundled.png"
+    bundled.write_bytes(b"bundled")
+    monkeypatch.setattr(storage_module, "bundled_portrait_path", lambda _player_id: bundled)
+
+    storage.sync_player_master([{
+        "player_id": "42",
+        "name": "Test",
+        "full_name": "Test Player",
+        "club": "Test FC",
+        "team_id": "1",
+        "position": "MF",
+    }])
+    storage.conn.execute(
+        "UPDATE player_master SET portrait_state = 'CACHED', portrait_path = ? WHERE player_id = '42'",
+        (str(local),),
+    )
+    storage.conn.commit()
+
+    assert storage.portrait_path("42") == str(local)
+
+
+def test_watchlist_is_persistent_and_league_specific(tmp_path):
+    storage = Storage(tmp_path / "watchlist.db")
+    storage.set_watchlisted("league-a", "player-1", True)
+    assert storage.is_watchlisted("league-a", "player-1")
+    assert not storage.is_watchlisted("league-b", "player-1")
+    assert storage.watchlist_ids("league-a") == {"player-1"}
+    storage.close()
+
+    reopened = Storage(tmp_path / "watchlist.db")
+    assert reopened.is_watchlisted("league-a", "player-1")
+    reopened.set_watchlisted("league-a", "player-1", False)
+    assert not reopened.is_watchlisted("league-a", "player-1")
+    reopened.close()
+
+
+def test_replace_league_ownership_snapshots_values_for_prediction_pool(tmp_path):
+    from app.services.league import LeagueManager, LeagueOverviewResult, LeagueOwnershipResult, ManagerSquadResult
+
+    storage = Storage(tmp_path / "ownership.db")
+    overview = LeagueOverviewResult(
+        league_id="l1",
+        managers=[
+            LeagueManager(manager_id="m-user", name="You", is_user=True),
+            LeagueManager(manager_id="m-other", name="Other", is_user=False),
+        ],
+    )
+    storage.replace_league_managers(overview)
+
+    ownership = LeagueOwnershipResult(
+        league_id="l1",
+        squads=[
+            ManagerSquadResult(
+                league_id="l1",
+                manager_id="m-user",
+                players=[{
+                    "player_id": "p-own", "name": "Own", "club": "Bayern", "team_id": "2",
+                    "position": "MF", "market_value": 10_000_000, "points_total": 0,
+                    "average_points": 0, "team_image": None,
+                }],
+            ),
+            ManagerSquadResult(
+                league_id="l1",
+                manager_id="m-other",
+                players=[{
+                    "player_id": "p-other", "name": "Other", "club": "Dortmund", "team_id": "3",
+                    "position": "ST", "market_value": 11_000_000, "points_total": 0,
+                    "average_points": 0, "team_image": None,
+                }],
+            ),
+        ],
+    )
+    storage.replace_league_ownership(ownership)
+
+    pool = storage.league_prediction_pool("l1")
+    assert [row["player_id"] for row in pool] == ["p-other"]
+    history = storage.history("p-other", 7)
+    assert history and history[-1]["value"] == 11_000_000

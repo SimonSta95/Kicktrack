@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import httpx
+from PySide6.QtCore import Qt
 from PySide6.QtGui import QIcon, QImage, QPixmap
 
 from .storage import app_data_dir
@@ -54,7 +55,13 @@ def ensure_logo_file() -> Path | None:
 
 
 def _crop_to_visible_content(pixmap: QPixmap) -> QPixmap:
-    """Trim the large OpenGraph background around the actual logo without altering it."""
+    """Trim the OpenGraph background without a costly full-resolution Python scan.
+
+    Older builds sampled the original image with ``pixelColor`` hundreds of
+    thousands of times on every start. Qt/Python calls are comparatively
+    expensive and could stall the UI for seconds. We detect the bounding box on
+    a small proxy image and map it back to the original resolution.
+    """
     if pixmap.isNull():
         return pixmap
 
@@ -64,40 +71,57 @@ def _crop_to_visible_content(pixmap: QPixmap) -> QPixmap:
     if width < 4 or height < 4:
         return pixmap
 
-    corner = image.pixelColor(0, 0)
-    sample_scale = max(1, max(width, height) // 700)
-    min_x, min_y = width, height
+    # A ~180 px proxy keeps the scan below ~32k pixels while preserving more
+    # than enough detail to locate the high-contrast Kickbase logo.
+    proxy_limit = 180
+    if max(width, height) > proxy_limit:
+        proxy = image.scaled(
+            proxy_limit, proxy_limit,
+            Qt.KeepAspectRatio, Qt.SmoothTransformation,
+        )
+    else:
+        proxy = image
+
+    pw = proxy.width()
+    ph = proxy.height()
+    corner = proxy.pixelColor(0, 0)
+    min_x, min_y = pw, ph
     max_x = max_y = -1
 
-    def different_from_background(x: int, y: int) -> bool:
-        color = image.pixelColor(x, y)
-        if color.alpha() < 20:
-            return False
-        distance = (
-            abs(color.red() - corner.red())
-            + abs(color.green() - corner.green())
-            + abs(color.blue() - corner.blue())
-        )
-        return distance > 60
-
-    for y in range(0, height, sample_scale):
-        for x in range(0, width, sample_scale):
-            if different_from_background(x, y):
-                min_x = min(min_x, x)
-                min_y = min(min_y, y)
-                max_x = max(max_x, x)
-                max_y = max(max_y, y)
+    for y in range(ph):
+        for x in range(pw):
+            color = proxy.pixelColor(x, y)
+            if color.alpha() < 20:
+                continue
+            distance = (
+                abs(color.red() - corner.red())
+                + abs(color.green() - corner.green())
+                + abs(color.blue() - corner.blue())
+            )
+            if distance <= 60:
+                continue
+            min_x = min(min_x, x)
+            min_y = min(min_y, y)
+            max_x = max(max_x, x)
+            max_y = max(max_y, y)
 
     if max_x < min_x or max_y < min_y:
         return pixmap
 
-    padding = max(4, int(min(width, height) * 0.02))
-    min_x = max(0, min_x - padding)
-    min_y = max(0, min_y - padding)
-    max_x = min(width - 1, max_x + padding)
-    max_y = min(height - 1, max_y + padding)
+    scale_x = width / float(pw)
+    scale_y = height / float(ph)
+    left = int(min_x * scale_x)
+    top = int(min_y * scale_y)
+    right = int((max_x + 1) * scale_x) - 1
+    bottom = int((max_y + 1) * scale_y) - 1
 
-    return pixmap.copy(min_x, min_y, max_x - min_x + 1, max_y - min_y + 1)
+    padding = max(4, int(min(width, height) * 0.02))
+    left = max(0, left - padding)
+    top = max(0, top - padding)
+    right = min(width - 1, right + padding)
+    bottom = min(height - 1, bottom + padding)
+
+    return pixmap.copy(left, top, right - left + 1, bottom - top + 1)
 
 
 def load_logo_pixmap() -> QPixmap | None:

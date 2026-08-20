@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import time
+
 from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta, timezone
@@ -39,6 +41,7 @@ class KickbaseClient:
             headers={
                 "Accept": "application/json",
                 "Content-Type": "application/json",
+                "Accept-Language": "de-DE,de;q=0.9",
             },
         )
         self.token: str | None = None
@@ -124,6 +127,10 @@ class KickbaseClient:
                 if token:
                     self.token = str(token)
                     self.client.headers["Authorization"] = f"Bearer {self.token}"
+                    # Some competition/player-profile routes used by the official app
+                    # still accept the same auth token through kkstrauth. Keep both
+                    # forms so v4 endpoints remain compatible.
+                    self.client.headers["Cookie"] = f"kkstrauth={self.token}"
                     return data
             except Exception as exc:  # Login-Fallbacks bewusst tolerant
                 last_error = str(exc)
@@ -342,6 +349,16 @@ class KickbaseClient:
                 or (player["player_id"] is not None and player["player_id"] in owned_player_ids)
             )
             if is_own_listing:
+                # A manager listing cannot be bought below the player's current
+                # market value. If an older listing price has fallen below MW,
+                # the economically relevant minimum sale value is therefore the
+                # current MW. A listing above MW remains the effective minimum.
+                listing_price = int(price or 0)
+                current_mv = int(market_value or 0)
+                effective_sale_value = max(listing_price, current_mv)
+                player["listing_price"] = listing_price
+                player["minimum_bid"] = current_mv if current_mv > 0 else listing_price
+                player["effective_sale_value"] = effective_sale_value
                 own_listings.append(player)
                 continue
 
@@ -389,7 +406,11 @@ class KickbaseClient:
                 active_bids.append({**player, "bid": selected["price"]})
 
         transfer_list_value = sum(
-            int(entry.get("price") or entry.get("market_value") or 0) for entry in own_listings
+            int(
+                entry.get("effective_sale_value")
+                or max(int(entry.get("price") or 0), int(entry.get("market_value") or 0))
+            )
+            for entry in own_listings
         )
         parsed_committed = sum(int(entry["bid"]) for entry in active_bids)
 
@@ -432,6 +453,159 @@ class KickbaseClient:
             "budget_raw": budget_raw,
             "market_raw": market_raw,
         }
+
+
+    def place_market_offer(self, league_id: str, player_id: str, price: int) -> dict:
+        """Place or replace the authenticated manager's offer for a market player."""
+        amount = int(price or 0)
+        if amount <= 0:
+            raise KickbaseError("Das Gebot muss größer als 0 € sein.")
+        path = f"/v4/leagues/{league_id}/market/{player_id}/offers"
+        response = self.client.post(path, json={"price": amount})
+        if response.status_code >= 400:
+            message = response.text[:500].strip()
+            raise KickbaseError(
+                f"Gebot konnte nicht abgegeben werden (HTTP {response.status_code})."
+                + (f"\n{message}" if message else "")
+            )
+        if not response.content:
+            return {"ok": True, "status_code": response.status_code}
+        try:
+            payload = response.json()
+        except ValueError:
+            payload = {}
+        return payload if isinstance(payload, dict) else {"data": payload}
+
+
+    @staticmethod
+    def _response_payload(response) -> dict:
+        if not getattr(response, "content", b""):
+            return {"ok": True, "status_code": int(response.status_code)}
+        try:
+            payload = response.json()
+        except ValueError:
+            payload = {}
+        return payload if isinstance(payload, dict) else {"data": payload}
+
+    @staticmethod
+    def _raise_write_error(action: str, response) -> None:
+        if response.status_code < 400:
+            return
+        message = str(getattr(response, "text", "") or "")[:500].strip()
+        raise KickbaseError(
+            f"{action} fehlgeschlagen (HTTP {response.status_code})."
+            + (f"\n{message}" if message else "")
+        )
+
+    def set_transfer_price(self, league_id: str, player_id: str, price: int | float) -> dict:
+        """Set/update the authenticated manager's listing price.
+
+        Verified against the official Kickbase Android app on 2026-08-18:
+        POST /v4/leagues/{leagueId}/market with ``pi`` as a string and ``prc``
+        as a JSON floating-point number.
+        """
+        amount = int(price or 0)
+        if amount <= 0:
+            raise KickbaseError("Der Verkaufspreis muss größer als 0 € sein.")
+        response = self.client.post(
+            f"/v4/leagues/{league_id}/market",
+            json={"pi": str(player_id), "prc": float(amount)},
+        )
+        self._raise_write_error("Verkaufspreis setzen", response)
+        return self._response_payload(response)
+
+    def list_player_for_sale(self, league_id: str, player_id: str, price: int | float) -> dict:
+        """List/update an owned player on the league market with one verified write.
+
+        Verified against the official Kickbase Android app on 2026-08-18:
+        ``POST /v4/leagues/{leagueId}/market`` with ``pi`` as a string and
+        ``prc`` as a JSON floating-point number. This action only lists the
+        player / changes the listing price; it does not accept a sale offer.
+        """
+        amount = int(price or 0)
+        if amount <= 0:
+            raise KickbaseError("Der Verkaufspreis muss größer als 0 € sein.")
+
+        response = self.client.post(
+            f"/v4/leagues/{league_id}/market",
+            json={"pi": str(player_id), "prc": float(amount)},
+        )
+        self._raise_write_error("Spieler anbieten", response)
+        return {
+            "ok": True,
+            "price_set": True,
+            "requested_price": amount,
+            "market": self._response_payload(response),
+        }
+
+    def remove_player_from_market(self, league_id: str, player_id: str) -> dict:
+        response = self.client.delete(f"/v4/leagues/{league_id}/market/{player_id}")
+        self._raise_write_error("Spieler vom Markt nehmen", response)
+        return self._response_payload(response)
+
+    def player_transfer_state(self, league_id: str, player_id: str) -> dict:
+        """Offer loading is intentionally disabled until the official request is captured."""
+        raise KickbaseError(
+            "Angebote laden ist noch nicht verifiziert. Der Request wird erst nach einem Mitschnitt der offiziellen App freigeschaltet."
+        )
+
+    def normalize_incoming_offers(self, payload: dict) -> list[dict]:
+        """Keep the parser ready for the verified offer payload once available."""
+        offers = payload.get("ofs") if isinstance(payload, dict) else None
+        if isinstance(offers, dict):
+            offers = [offers]
+        if not isinstance(offers, list):
+            return []
+        result = []
+        for raw in offers:
+            if not isinstance(raw, dict):
+                continue
+            offer_id = raw.get("i") or raw.get("id") or raw.get("oi") or raw.get("ofi") or raw.get("offerId")
+            price = self._first_int(raw, ("prc", "price", "p", "amount", "bid", "uop"))
+            user = raw.get("u") or raw.get("ui") or raw.get("user") or raw.get("userId") or raw.get("uid")
+            user_id = None
+            user_name = None
+            if isinstance(user, dict):
+                user_id = user.get("i") or user.get("id") or user.get("u") or user.get("ui")
+                user_name = user.get("n") or user.get("name") or user.get("unm")
+            elif user is not None:
+                user_id = user
+            user_id = raw.get("uoid") or raw.get("oui") or user_id
+            user_name = raw.get("unm") or raw.get("username") or raw.get("name") or user_name
+            is_kickbase = user_id is None and not user_name
+            result.append({
+                "offer_id": str(offer_id) if offer_id is not None else None,
+                "price": int(price or 0),
+                "user_id": str(user_id) if user_id is not None else None,
+                "user_name": str(user_name) if user_name else ("Kickbase" if is_kickbase else "Manager"),
+                "is_kickbase": bool(is_kickbase),
+                "raw": raw,
+            })
+        return sorted(result, key=lambda row: int(row.get("price") or 0), reverse=True)
+
+    def accept_manager_offer(self, league_id: str, player_id: str, offer_id: str) -> dict:
+        raise KickbaseError(
+            "Angebote annehmen ist noch nicht verifiziert und deshalb aus Sicherheitsgründen deaktiviert."
+        )
+
+    def decline_manager_offer(self, league_id: str, player_id: str, offer_id: str) -> dict:
+        raise KickbaseError(
+            "Angebote ablehnen ist noch nicht verifiziert und deshalb aus Sicherheitsgründen deaktiviert."
+        )
+
+    def accept_kickbase_sale_offer(self, league_id: str, player_id: str) -> dict:
+        """Accept the current Kickbase-owned sale offer for a listed player.
+
+        Verified against the official Kickbase Android app on 2026-08-20:
+        ``POST /v4/leagues/{leagueId}/market/{playerId}/sell`` with no request
+        body. This is deliberately kept separate from manager offers, which
+        require a specific offer-selection flow that is not yet verified.
+        """
+        response = self.client.post(
+            f"/v4/leagues/{league_id}/market/{player_id}/sell"
+        )
+        self._raise_write_error("An Kickbase verkaufen", response)
+        return self._response_payload(response)
 
 
     def market_overview(
@@ -501,6 +675,11 @@ class KickbaseClient:
                 "d1": self._first_int(item, ("tfhmvt", "dailyChange")),
                 "price": self._first_int(item, ("prc", "price")),
                 "market_trend": self._first_int(item, ("mvt", "marketValueTrend")),
+                # Only Kickbase's canonical availability fields are valid here.
+                # Never fall back to a generic field named `status`: other v4
+                # endpoints use that name for a different enum (values like 3/5).
+                "status": self._first_int(item, ("st",)),
+                "status_list": item.get("stl") or [],
                 "points_total": self._first_int(item, ("p", "points")) if points_are_current else None,
                 "average_points": self._first_int(item, ("ap", "averagePoints")) if points_are_current else None,
                 "seller_id": str(seller_id) if seller_id is not None else None,
@@ -515,20 +694,10 @@ class KickbaseClient:
                 "team_image": item.get("pim"),
                 "raw": item,
             })
-        # The market endpoint frequently omits tfhmvt. Enrich only those rows
-        # through the canonical player-detail endpoint; results are cached per day.
-        missing_ids = [
-            str(row.get("player_id"))
-            for row in entries
-            if row.get("player_id") and row.get("d1") is None
-        ]
-        if missing_ids:
-            exact_changes = self.market_daily_changes(str(league_id), missing_ids)
-            for row in entries:
-                pid = str(row.get("player_id") or "")
-                if row.get("d1") is None and pid in exact_changes and exact_changes[pid] is not None:
-                    row["d1"] = int(exact_changes[pid])
-                    row["daily_change"] = int(exact_changes[pid])
+        # Keep the normal market load lightweight. Some market payloads omit
+        # ``tfhmvt``; do NOT fan out into one player-detail request per missing
+        # value here. Missing 24h values remain ``None`` and can be filled by
+        # explicit/expensive scanner workflows instead.
 
         overview["market_entries"] = entries
         overview["points_are_current"] = points_are_current
@@ -577,6 +746,23 @@ class KickbaseClient:
     def player_performance(self, league_id: str, player_id: str) -> dict:
         data = self._get_json(f"/v4/leagues/{league_id}/players/{player_id}/performance")
         return data if isinstance(data, dict) else {}
+
+    def player_match_center(
+        self,
+        league_id: str,
+        player_id: str,
+        match_id: str,
+        competition_id: str | int = 1,
+    ) -> dict:
+        data = self._get_json(
+            f"/v4/competitions/{competition_id}/playercenter/{player_id}",
+            params={"leagueId": str(league_id), "matchId": str(match_id)},
+        )
+        return data if isinstance(data, dict) else {}
+
+    def live_event_types(self) -> dict | list:
+        data = self._get_json("/v4/live/eventtypes")
+        return data if isinstance(data, (dict, list)) else {}
 
     def competition_fixtures(self, competition_id: str | int = 1) -> dict:
         data = self._get_json(f"/v4/competitions/{competition_id}/matchdays")
@@ -838,23 +1024,79 @@ class KickbaseClient:
                     return value.strip()
         return ""
 
-    def competition_player_teams(self) -> dict[str, dict[str, str | None]]:
-        """Fetch current Bundesliga player/team assignments.
+    def competition_players(self) -> list[dict]:
+        """Fetch the complete current competition player catalogue.
 
-        This method intentionally does not cache in memory. Persistent TTL
-        caching is handled by ``Storage``/``LeagueAnalysisService`` so the app
-        stays lightweight and the cache survives restarts.
+        The public competition ``/players`` route currently returns only the
+        first 25 rows in some API versions and may ignore pagination offsets.
+        Relying on it as the sole player-master source therefore silently
+        truncates the Bundesliga pool.  Team profiles, on the other hand,
+        expose the current squad for each Kickbase club and are already used by
+        the app as the canonical source for player availability status.
+
+        We consequently build the catalogue from all known team profiles and
+        use the competition route only as an enrichment/fallback source.  This
+        also makes promoted/relegated/transfer additions visible as soon as
+        they appear in their club profile.
         """
-        data = self._get_json(
-            "/v4/competitions/1/players",
-            params={"position": "0", "sorting": "1"},
-        )
-        candidates = self._items(data)
-        if isinstance(data, list):
-            candidates = [item for item in data if isinstance(item, dict)]
+        catalogue_rows: dict[str, dict] = {}
 
-        mapping: dict[str, dict[str, str | None]] = {}
-        for item in candidates:
+        # 1) Best-effort competition catalogue. It is useful for fields such
+        # as market value/points even when the endpoint is truncated to 25.
+        path = "/v4/competitions/1/players"
+        try:
+            data = self._get_json(path, params={"position": "0", "sorting": "1"})
+            items = self._items(data)
+            if isinstance(data, list):
+                items = [item for item in data if isinstance(item, dict)]
+            for item in items:
+                player_id = item.get("i") or item.get("pi") or item.get("id")
+                if player_id is not None:
+                    catalogue_rows[str(player_id)] = dict(item)
+        except Exception:
+            pass
+
+        # 2) Canonical complete pool: one teamprofile request per Bundesliga
+        # club. Squads are small enough that these responses are not affected
+        # by the 25-row competition catalogue limitation.
+        combined: dict[str, dict] = {}
+        for team_id, club_name in TEAM_NAMES.items():
+            try:
+                data = self._get_json(f"/v4/competitions/1/teams/{team_id}/teamprofile")
+            except Exception:
+                continue
+            items = self._items(data)
+            if isinstance(data, dict) and isinstance(data.get("it"), list):
+                items = [row for row in data.get("it") or [] if isinstance(row, dict)]
+            if isinstance(data, list):
+                items = [row for row in data if isinstance(row, dict)]
+
+            for row in items:
+                player_id = row.get("i") or row.get("pi") or row.get("id")
+                if player_id is None:
+                    continue
+                key = str(player_id)
+                # Start with the (possibly richer) catalogue row and overwrite
+                # with teamprofile values where present. Team assignment is
+                # always taken from the profile currently being queried.
+                merged = dict(catalogue_rows.get(key) or {})
+                merged.update(row)
+                merged["tid"] = team_id
+                merged["tn"] = club_name
+                combined[key] = merged
+
+        # If teamprofile calls fail completely (e.g. temporary API outage), do
+        # not turn a usable 25-row catalogue into an empty master.
+        if not combined:
+            combined = catalogue_rows
+        else:
+            # Keep catalogue-only rows as well. They may represent a brand-new
+            # player whose teamprofile propagation is a few minutes behind.
+            for key, row in catalogue_rows.items():
+                combined.setdefault(key, row)
+
+        players: list[dict] = []
+        for item in combined.values():
             player_id = item.get("i") or item.get("pi") or item.get("id")
             if player_id is None:
                 continue
@@ -863,11 +1105,72 @@ class KickbaseClient:
             club = self._club_from_payload(item)
             if not club and team_id is not None:
                 club = team_name(team_id)
-            name = item.get("n") or item.get("pn") or item.get("name")
-            mapping[str(player_id)] = {
-                "club": club or None,
+
+            first = str(item.get("fn") or item.get("firstName") or "").strip()
+            last = str(item.get("ln") or item.get("n") or item.get("lastName") or item.get("name") or "").strip()
+            full_name = " ".join(part for part in (first, last) if part).strip() or last or first or f"Spieler {player_id}"
+            pos_raw = item.get("pos") if item.get("pos") is not None else item.get("position")
+            players.append({
+                "player_id": str(player_id),
+                "name": last or full_name,
+                "full_name": full_name,
+                "club": club or "",
                 "team_id": team_id,
-                "team_image": item.get("pim") or item.get("tim"),
+                "team_image": item.get("pim") or item.get("tim") or item.get("teamSymbol"),
+                "position": self.POSITION_MAP.get(pos_raw, self.POSITION_MAP.get(str(pos_raw), str(pos_raw or ""))),
+                "market_value": self._first_int(item, ("mv", "marketValue")),
+                "market_trend": self._first_int(item, ("mvt", "marketValueTrend")),
+                "competition_status": self._first_int(item, ("status",)),
+                "average_points": self._first_int(item, ("ap", "averagePoints")),
+                "points_total": self._first_int(item, ("p", "tp", "totalPoints")),
+                "raw": item,
+            })
+
+        players.sort(key=lambda player: ((player.get("club") or "").casefold(), (player.get("name") or "").casefold()))
+        return players
+
+
+    def competition_player_statuses(self) -> dict[str, dict]:
+        """Return canonical Kickbase availability status for competition players.
+
+        The competition-wide ``/players`` catalogue exposes a field named
+        ``status`` whose values are *not* the same status enum used by league
+        player rows.  Kickbase-Insights gets the actual availability value from
+        each team's ``teamprofile`` rows (``st`` / ``stl``), so we deliberately
+        do the same here.
+        """
+        statuses: dict[str, dict] = {}
+        for team_id in TEAM_NAMES:
+            try:
+                data = self._get_json(f"/v4/competitions/1/teams/{team_id}/teamprofile")
+            except Exception:
+                continue
+            items = self._items(data)
+            if isinstance(data, dict) and isinstance(data.get("it"), list):
+                items = [row for row in data.get("it") or [] if isinstance(row, dict)]
+            for item in items:
+                player_id = item.get("i") or item.get("pi") or item.get("id")
+                if player_id is None:
+                    continue
+                raw_status = item.get("st")
+                try:
+                    status = int(raw_status) if raw_status is not None else None
+                except (TypeError, ValueError):
+                    status = None
+                statuses[str(player_id)] = {
+                    "status": status,
+                    "status_list": item.get("stl") or [],
+                }
+        return statuses
+
+    def competition_player_teams(self) -> dict[str, dict[str, str | None]]:
+        """Return canonical current player/team assignments."""
+        mapping: dict[str, dict[str, str | None]] = {}
+        for item in self.competition_players():
+            mapping[str(item["player_id"])] = {
+                "club": item.get("club") or None,
+                "team_id": item.get("team_id"),
+                "team_image": item.get("team_image"),
             }
         return mapping
 
@@ -967,10 +1270,35 @@ class KickbaseClient:
     # ------------------------------------------------------------------
 
     def player_details(self, league_id: str, player_id: str) -> dict:
-        """Load the canonical league player detail payload and normalize core fields."""
-        data = self._get_json(f"/v4/leagues/{league_id}/players/{player_id}")
-        if not isinstance(data, dict):
-            return {}
+        """Load rich player details, including Kickbase's localized status note.
+
+        Kickbase-Insights showed that ``stxt`` is exposed by the competition player
+        profile. We merge that payload with the league detail payload because the
+        latter remains useful for league-specific values.
+        """
+        league_data: dict = {}
+        profile_data: dict = {}
+        try:
+            raw = self._get_json(f"/v4/leagues/{league_id}/players/{player_id}")
+            if isinstance(raw, dict):
+                league_data = raw
+        except Exception:
+            league_data = {}
+        try:
+            raw = self._get_json(
+                f"/v4/competitions/1/players/{player_id}",
+                params={"leagueId": str(league_id)},
+            )
+            if isinstance(raw, dict):
+                profile_data = raw
+        except Exception:
+            profile_data = {}
+
+        if not league_data and not profile_data:
+            raise KickbaseError("Spielerdetails konnten nicht geladen werden.")
+
+        data = dict(profile_data)
+        data.update({k: v for k, v in league_data.items() if v is not None})
         first = str(data.get("fn") or data.get("firstName") or "").strip()
         last = str(data.get("ln") or data.get("n") or data.get("lastName") or "").strip()
         full_name = " ".join(part for part in (first, last) if part).strip() or last or first
@@ -979,42 +1307,50 @@ class KickbaseClient:
         club = str(data.get("tn") or data.get("teamName") or "").strip()
         if not club and team_id:
             club = team_name(team_id)
+        status_text = str(profile_data.get("stxt") or data.get("stxt") or "").strip()
+        status_value = data.get("st") if data.get("st") is not None else data.get("status")
+        status_list = data.get("stl") or data.get("statusList") or profile_data.get("stl") or []
         return {
-            "player_id": str(data.get("i") or player_id),
+            "player_id": str(data.get("i") or data.get("id") or player_id),
             "name": last or full_name or "Spieler",
             "full_name": full_name or last or "Spieler",
             "club": club,
             "team_id": team_id,
-            "position": self.POSITION_MAP.get(data.get("pos"), str(data.get("pos") or "")),
-            "market_value": self._to_int(data.get("mv")),
+            "position": self.POSITION_MAP.get(data.get("pos") if data.get("pos") is not None else data.get("position"), str(data.get("pos") or data.get("position") or "")),
+            "market_value": self._to_int(data.get("mv") if data.get("mv") is not None else data.get("marketValue")),
             "daily_change": self._to_int(data.get("tfhmvt")),
-            "points_total": self._to_int(data.get("tp") if data.get("tp") is not None else data.get("p")),
-            "average_points": self._to_int(data.get("ap")),
-            "team_image": data.get("tim"),
-            "status": self._to_int(data.get("st")),
-            "status_list": data.get("stl") or [],
+            "points_total": self._to_int(data.get("tp") if data.get("tp") is not None else data.get("p") if data.get("p") is not None else data.get("totalPoints")),
+            "average_points": self._to_int(data.get("ap") if data.get("ap") is not None else data.get("averagePoints")),
+            "team_image": data.get("tim") or data.get("pim"),
+            "status": self._to_int(status_value),
+            "status_list": status_list,
+            "status_text": status_text or None,
             "raw": data,
+            "profile_raw": profile_data,
         }
-
-    # ------------------------------------------------------------------
-    # Optional market-value history (for later player detail charts)
-    # ------------------------------------------------------------------
 
     def market_value_history(
         self,
         league_id: str,
         player_id: str,
-        timeframe: int = 92,
+        timeframe: int = 365,
     ) -> dict:
-        # Die Doku enthält beide Schreibweisen; camelCase zuerst.
+        """Load market-value history, preferring the competition-wide v4 route.
+
+        The external Kickbase-Insights project uses the competition endpoint for
+        a full 365-day history. League routes remain as fallbacks because Kickbase
+        has changed these paths before.
+        """
+        timeframe = max(1, int(timeframe or 365))
         paths = [
-            f"/v4/leagues/{league_id}/players/{player_id}/marketValue/{timeframe}",
-            f"/v4/leagues/{league_id}/players/{player_id}/marketvalue/{timeframe}",
+            (f"/v4/competitions/1/players/{player_id}/marketValue/{timeframe}", None),
+            (f"/v4/leagues/{league_id}/players/{player_id}/marketValue/{timeframe}", None),
+            (f"/v4/leagues/{league_id}/players/{player_id}/marketvalue/{timeframe}", None),
         ]
         last_error: Exception | None = None
-        for path in paths:
+        for path, params in paths:
             try:
-                data = self._get_json(path)
+                data = self._get_json(path, params=params)
                 return data if isinstance(data, dict) else {"it": data}
             except Exception as exc:
                 last_error = exc

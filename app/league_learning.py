@@ -127,7 +127,11 @@ def normalize_market_value_history(payload) -> list[dict]:
                     day = datetime.fromtimestamp(numeric).date().isoformat()
             except (TypeError, ValueError, OSError, OverflowError):
                 continue
-        normalized.append({"value": value, "snapshot_date": day, "recorded_at": text})
+        normalized.append({
+            "value": value,
+            "snapshot_date": day,
+            "recorded_at": f"{day}T12:00:00+00:00",
+        })
     by_day = {row["snapshot_date"]: row for row in normalized}
     return [by_day[key] for key in sorted(by_day)]
 

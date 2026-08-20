@@ -1,6 +1,10 @@
 from __future__ import annotations
 
 from datetime import UTC, date, datetime
+from zoneinfo import ZoneInfo
+
+BERLIN = ZoneInfo("Europe/Berlin")
+SEASON_MODE_START = datetime(2026, 8, 21, 22, 0, tzinfo=BERLIN)
 
 
 def current_season_start(reference: date | datetime | None = None) -> date:
@@ -25,6 +29,29 @@ def current_season_start(reference: date | datetime | None = None) -> date:
 def season_label(reference: date | datetime | None = None) -> str:
     start = current_season_start(reference)
     return f"{start.year}/{str(start.year + 1)[-2:]}"
+
+
+def season_mode(reference: datetime | None = None, override: str | None = None) -> str:
+    """Resolve the UI mode independently from the availability of season stats.
+
+    ``AUTO`` switches to SEASON exactly at the configured Berlin kickoff.
+    Manual overrides are intentionally supported so the season UI can be tested
+    before kickoff without changing the system clock.
+    """
+    normalized = str(override or "AUTO").strip().upper()
+    if normalized in {"PRESEASON", "SEASON"}:
+        return normalized
+
+    now = reference or datetime.now(BERLIN)
+    if now.tzinfo is None:
+        now = now.replace(tzinfo=BERLIN)
+    else:
+        now = now.astimezone(BERLIN)
+    return "SEASON" if now >= SEASON_MODE_START else "PRESEASON"
+
+
+def season_mode_active(reference: datetime | None = None, override: str | None = None) -> bool:
+    return season_mode(reference, override) == "SEASON"
 
 
 def filter_current_season_transfers(

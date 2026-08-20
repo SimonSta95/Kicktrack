@@ -16,6 +16,7 @@ class Prediction:
     sample_count: int
     history_days: int
     method: str = "24h persistence + historical calibration"
+    baseline_delta: int | None = None
 
     def as_dict(self) -> dict:
         return {
@@ -27,6 +28,7 @@ class Prediction:
             "sample_count": self.sample_count,
             "history_days": self.history_days,
             "method": self.method,
+            "baseline_delta": self.baseline_delta,
         }
 
 
@@ -100,6 +102,8 @@ def build_predictions(
     rows: Iterable[dict],
     current_values: dict[str, int] | None = None,
     current_deltas: dict[str, int] | None = None,
+    *,
+    target_date: date | str | None = None,
 ) -> dict[str, dict]:
     """Predict the next daily Kickbase market-value refresh.
 
@@ -118,6 +122,13 @@ def build_predictions(
     samples = _historical_samples(series)
     current_values = {str(k): int(v) for k, v in (current_values or {}).items() if v is not None}
     current_deltas = {str(k): int(v) for k, v in (current_deltas or {}).items() if v is not None}
+    if isinstance(target_date, date):
+        forecast_target = target_date
+    elif target_date:
+        forecast_target = date.fromisoformat(str(target_date)[:10])
+    else:
+        forecast_target = date.today()
+
     result: dict[str, dict] = {}
 
     for player_id, points in series.items():
@@ -136,12 +147,36 @@ def build_predictions(
             latest_delta = int(current_deltas[player_id])
         else:
             previous_day = latest_day - timedelta(days=1)
-            if previous_day in values:
+
+            # A pre-22:00 live snapshot for the target day still contains the
+            # value from the previous completed refresh. Comparing it with the
+            # previous calendar day therefore creates an artificial 0 € signal.
+            # For players without Kickbase's live d1 field (notably cached
+            # MANAGER_SQUAD players), use the last *completed* history move.
+            if latest_day >= forecast_target:
+                completed_day = latest_day - timedelta(days=1)
+                completed_previous = completed_day - timedelta(days=1)
+                if completed_day in values and completed_previous in values:
+                    latest_delta = int(values[completed_day]) - int(values[completed_previous])
+                elif previous_day in values:
+                    latest_delta = current - int(values[previous_day])
+                elif len(points) >= 3:
+                    latest_delta = int(points[-2][1]) - int(points[-3][1])
+                else:
+                    result[player_id] = Prediction(
+                        None, None, None, None, "UNSICHER", 0, len(points),
+                        baseline_delta=None,
+                    ).as_dict()
+                    continue
+            elif previous_day in values:
                 latest_delta = current - int(values[previous_day])
             elif len(points) >= 2:
                 latest_delta = current - int(points[-2][1])
             else:
-                result[player_id] = Prediction(None, None, None, None, "UNSICHER", 0, len(points)).as_dict()
+                result[player_id] = Prediction(
+                    None, None, None, None, "UNSICHER", 0, len(points),
+                    baseline_delta=None,
+                ).as_dict()
                 continue
 
         # Comparable historical cases: same direction and broadly similar daily
@@ -217,6 +252,7 @@ def build_predictions(
             confidence=confidence,
             sample_count=len(analogs),
             history_days=len(points),
+            baseline_delta=latest_delta,
         ).as_dict()
 
     return result

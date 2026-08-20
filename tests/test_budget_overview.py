@@ -189,3 +189,68 @@ def test_market_overview_hides_previous_season_points_before_market_start(monkey
     assert result["points_are_current"] is False
     assert result["market_entries"][0]["points_total"] is None
     assert result["market_entries"][0]["average_points"] is None
+
+
+def test_budget_overview_uses_current_market_value_when_own_listing_is_below_mv(monkeypatch):
+    client = KickbaseClient()
+    budget = {"b": 4_000_000}
+    market = {
+        "it": [
+            {
+                "i": "sell-1",
+                "n": "Listed",
+                "ui": "me",
+                "prc": 5_000_000,
+                "mv": 6_250_000,
+            }
+        ]
+    }
+
+    monkeypatch.setattr(
+        client,
+        "_get_json",
+        lambda path, *, params=None: budget if path.endswith("/me/budget") else market,
+    )
+    result = client.budget_overview("league", "me", {"sell-1"})
+    client.close()
+
+    assert result["transfer_list_value"] == 6_250_000
+    assert result["total_budget"] == 10_250_000
+    assert result["rest_budget"] == 10_250_000
+    assert result["own_listings"][0]["listing_price"] == 5_000_000
+    assert result["own_listings"][0]["minimum_bid"] == 6_250_000
+    assert result["own_listings"][0]["effective_sale_value"] == 6_250_000
+
+
+def test_market_overview_does_not_fan_out_player_detail_requests_for_missing_daily_change(monkeypatch):
+    client = KickbaseClient()
+    budget = {"b": 10_000_000, "pbaa": 10_000_000}
+    market = {
+        "it": [
+            {
+                "i": "42", "fn": "Fast", "n": "Market", "tid": "8", "pos": 3,
+                "mv": 7_000_000, "prc": 7_100_000,
+                "u": {"i": "manager-7", "n": "Kelzi95"},
+            }
+        ]
+    }
+    calls = []
+
+    def fake_get(path, *, params=None):
+        calls.append(path)
+        if path.endswith("/me/budget"):
+            return budget
+        if path == "/v4/leagues/league/market":
+            return market
+        raise AssertionError(f"unexpected detail request: {path}")
+
+    monkeypatch.setattr(client, "_get_json", fake_get)
+    result = client.market_overview("league", "me", set())
+    client.close()
+
+    player = result["market_entries"][0]
+    assert player["d1"] is None
+    assert player["daily_change"] is None
+    assert player["seller_name"] == "Kelzi95"
+    assert player["seller_id"] == "manager-7"
+    assert calls == ["/v4/leagues/league/me/budget", "/v4/leagues/league/market"]

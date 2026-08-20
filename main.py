@@ -1,11 +1,14 @@
 import ctypes
 import sys
 
+from PySide6.QtGui import QFont
 from PySide6.QtWidgets import QApplication
 
 from app.branding import app_icon, bundled_icon_path
 from app.theme import APP_STYLESHEET
+from app.fonts import body_font_family, load_local_fonts, print_font_report
 from app.ui import MainWindow
+from app.version import APP_DISPLAY_NAME
 
 
 def _set_windows_app_id() -> None:
@@ -72,7 +75,10 @@ def main() -> int:
 
     app = QApplication(sys.argv)
     app.setApplicationName("KickTrack")
-    app.setApplicationDisplayName("KickTrack — Kickbase Analytics")
+    app.setApplicationDisplayName(APP_DISPLAY_NAME)
+    font_report = load_local_fonts()
+    print_font_report(font_report)
+    app.setFont(QFont(body_font_family()))
     app.setStyleSheet(APP_STYLESHEET)
 
     icon = app_icon()

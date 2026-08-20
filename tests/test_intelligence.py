@@ -9,6 +9,21 @@ def test_player_form_metrics():
     assert result["ceiling"] == 90
 
 
+
+def test_player_form_keeps_matchday_metadata_for_detail_chart():
+    payload = {"it": [{"ph": [{
+        "day": 4, "p": 123, "t1": "2", "t2": "43",
+        "md": "2026-09-12T13:30:00Z", "cur": True, "st": 1,
+    }]}]}
+    result = player_form(payload)
+    match = result["matches"][0]
+    assert match["day"] == 4
+    assert match["points"] == 123
+    assert match["opponent_home"] == "2"
+    assert match["opponent_away"] == "43"
+    assert match["match_date"] == "2026-09-12T13:30:00Z"
+
+
 def test_fixture_run_uses_opponent_table_place():
     fixtures = {"value": {"day": 1, "it": [{"day": 1, "it": [{"mi": "1", "t1": "8", "t2": "2", "t1sy": "S04", "t2sy": "FCB"}]}]}}
     table = {"value": {"it": [{"tid": "2", "tn": "Bayern", "cp": 1}, {"tid": "8", "tn": "Schalke", "cp": 18}]}}
@@ -76,3 +91,87 @@ def test_lineup_optimizer_chooses_best_valid_formation():
         players.append({"player_id": f"p{i}", "name": f"P{i}", "position": pos, "market_value": 1_000_000, "average_points": points, "kickbase_status": 0})
     result = optimize_lineup(players)
     assert result["formation"] == "3-5-2"
+
+
+def test_lineup_optimizer_can_force_424():
+    players = []
+    positions = ["TW"] + ["ABW"] * 5 + ["MF"] * 5 + ["ST"] * 4
+    for i, pos in enumerate(positions):
+        players.append({
+            "player_id": str(i),
+            "name": f"P{i}",
+            "position": pos,
+            "market_value": 1_000_000,
+            "average_points": 50 + i,
+            "kickbase_status": 0,
+        })
+    result = optimize_lineup(players, formation="4-2-4")
+    assert result["feasible"] is True
+    assert result["formation"] == "4-2-4"
+    assert sum(1 for p in result["players"] if p["position"] == "ABW") == 4
+    assert sum(1 for p in result["players"] if p["position"] == "MF") == 2
+    assert sum(1 for p in result["players"] if p["position"] == "ST") == 4
+
+
+def test_lineup_optimizer_marks_forced_formation_infeasible_without_fallback():
+    players = []
+    positions = ["TW"] + ["ABW"] * 4 + ["MF"] * 5 + ["ST"] * 2
+    for i, pos in enumerate(positions):
+        players.append({
+            "player_id": str(i),
+            "name": f"P{i}",
+            "position": pos,
+            "market_value": 1_000_000,
+            "average_points": 50 + i,
+            "kickbase_status": 0,
+        })
+    result = optimize_lineup(players, formation="5-2-3")
+    assert result["feasible"] is False
+    assert result["formation"] == "5-2-3"
+    assert result["players"] == []
+    assert result["missing"] == {"ABW": 1, "ST": 1}
+
+
+def test_player_form_keeps_match_id_and_prefers_current_season_group():
+    payload = {
+        "it": [
+            {"sid": "34", "ti": "2025/2026", "ph": [{"mi": "8604", "day": 33, "p": 152}]},
+            {"sid": "42", "ti": "2026/2027", "ph": [
+                {"mi": "11935", "day": 1, "p": 101, "cur": True, "t1": "43", "t2": "15"}
+            ]},
+        ]
+    }
+    result = player_form(payload)
+    assert len(result["matches"]) == 1
+    assert result["matches"][0]["match_id"] == "11935"
+    assert result["matches"][0]["season_title"] == "2026/2027"
+
+
+def test_event_type_and_playercenter_normalization():
+    from app.intelligence import normalize_event_types, normalize_match_events
+
+    labels = normalize_event_types({"it": [
+        {"i": 3426, "ti": "Minutenbonus"},
+        {"i": 3416, "ti": "Ballverlust"},
+    ]})
+    assert labels == {"3426": "Minutenbonus", "3416": "Ballverlust"}
+
+    summary = normalize_match_events({
+        "i": "2522",
+        "n": "Raum",
+        "mi": 8604,
+        "p": 152,
+        "t1": 43,
+        "t2": 39,
+        "t1g": 2,
+        "t2g": 1,
+        "events": [
+            {"ei": "1", "eti": 3426, "p": 6, "mt": 94},
+            {"ei": "2", "eti": 3416, "p": -1, "mt": 67},
+            {"ei": "3", "eti": 9999, "p": 0, "mt": 50},
+        ],
+    }, labels)
+    assert summary["total_points"] == 152
+    assert summary["event_points"] == 5
+    assert summary["unmapped_points"] == 147
+    assert [event["label"] for event in summary["point_events"]] == ["Minutenbonus", "Ballverlust"]

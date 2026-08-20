@@ -7,3 +7,8 @@ __pycache__/
 .idea/
 manager_transfers.json
 debug/
+build/
+dist/
+KickTrack.zip
+.pytest_cache/
+.ruff_cache/

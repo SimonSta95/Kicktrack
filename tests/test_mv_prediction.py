@@ -56,3 +56,28 @@ def test_live_24h_delta_overrides_stale_same_value_daily_snapshot():
     assert pred["delta"] > 0
     assert pred["delta"] != 0
     assert pred["expected_value"] > 5_700_000
+
+
+def test_prediction_uses_last_completed_move_when_target_day_snapshot_is_stale():
+    rows = []
+    for idx in range(20):
+        base = 5_000_000 + idx * 20_000
+        rows += _rows(f"hist-fallback-{idx}", [base, base + 180_000, base + 370_000, base + 565_000])
+
+    # 18 Aug is a pre-refresh snapshot and still equals 17 Aug. Without a live
+    # d1 field the old code interpreted this as a real 0 € move.
+    rows += _rows(
+        "manager-player",
+        [5_300_000, 5_500_000, 5_700_000, 5_700_000],
+        start=date(2026, 8, 15),
+    )
+    pred = build_predictions(
+        rows,
+        current_values={"manager-player": 5_700_000},
+        target_date=date(2026, 8, 18),
+    )["manager-player"]
+
+    assert pred["baseline_delta"] == 200_000
+    assert pred["delta"] > 0
+    assert pred["delta"] != 0
+    assert pred["sample_count"] > 0

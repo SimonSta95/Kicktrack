@@ -3,6 +3,8 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from typing import Iterable
 
+from .squad_rules import MAX_SQUAD_SIZE, active_bid_count, squad_capacity
+
 
 def _parse_dt(value):
     if not value:
@@ -118,7 +120,10 @@ def _market_secondary_tags(row: dict, primary_reason: str, secondary_reason: str
     if max_bid and minimum_bid and minimum_bid <= max_bid:
         add("INNERHALB MAX-BID")
 
-    return tags[:3]
+    value_score = row.get("value_score")
+    if value_score is not None and int(value_score) >= 80:
+        add("TOP PREIS-LEISTUNG")
+    return tags[:4]
 
 
 def _sell_secondary_tags(row: dict, primary_reason: str, secondary_reason: str | None) -> list[str]:
@@ -293,6 +298,72 @@ def _kickbase_offer_advice(row: dict) -> dict | None:
         "reasons": reasons[:3],
     }
 
+def _active_bid_advice(row: dict) -> dict | None:
+    """Coach advice for the user's own active bid on a market player."""
+    own_bid = int(row.get("own_bid") or 0)
+    if own_bid <= 0:
+        return None
+
+    mv = int(row.get("market_value") or 0)
+    minimum_bid = int(row.get("minimum_bid") or mv or 0)
+    max_bid = int(row.get("max_bid") or 0)
+    expires = str(row.get("expiry_text") or row.get("expires_text") or "").strip()
+    reasons: list[str] = []
+
+    if mv > 0:
+        diff = own_bid - mv
+        reasons.append(f"Gebot {diff:+,.0f} € zum aktuellen MW".replace(',', '.'))
+    if max_bid > 0:
+        reasons.append(f"Analytische Obergrenze {max_bid:,.0f} €".replace(',', '.'))
+    if expires and expires != "–":
+        reasons.append(f"Ablauf {expires}")
+
+    if minimum_bid > 0 and own_bid < minimum_bid:
+        gap = minimum_bid - own_bid
+        return {
+            "kind": "bid",
+            "label": "GEBOT ANPASSEN",
+            "primary_reason": "OFFENES GEBOT",
+            "secondary_reason": "MINDESTGEBOT GESTIEGEN",
+            "secondary_tags": ["GEBOT AKTIV", "PREIS PRÜFEN"],
+            "priority": 97,
+            "planability": "HOCH",
+            "action": f"Dein Gebot liegt {gap:,.0f} € unter dem aktuellen Mindestgebot. Vor Ablauf erhöhen oder bewusst aussteigen.".replace(',', '.'),
+            "reasons": reasons[:3],
+        }
+
+    if max_bid > 0 and own_bid > max_bid:
+        over = own_bid - max_bid
+        return {
+            "kind": "bid",
+            "label": "GEBOT PRÜFEN",
+            "primary_reason": "RISIKOLIMIT",
+            "secondary_reason": "ÜBER MAX-BID",
+            "secondary_tags": ["GEBOT AKTIV", "LIMIT ÜBERSCHRITTEN"],
+            "priority": 94,
+            "planability": "HOCH",
+            "action": f"Dein Gebot liegt {over:,.0f} € über unserer aktuellen Obergrenze. Wenn möglich Gebot korrigieren oder das zusätzliche Risiko bewusst akzeptieren.".replace(',', '.'),
+            "reasons": reasons[:3],
+        }
+
+    role = str(row.get("portfolio_role") or "").upper()
+    investment = int(row.get("investment_score") or 0)
+    squad_fit = int(row.get("squad_fit_score") or 0)
+    if role in {"KADERZIEL", "INVEST"} or max(investment, squad_fit) >= 75:
+        return {
+            "kind": "bid",
+            "label": "GEBOT LÄUFT",
+            "primary_reason": "OFFENES GEBOT",
+            "secondary_reason": "INNERHALB LIMIT",
+            "secondary_tags": ["GEBOT AKTIV", "NICHT NACHBIETEN"],
+            "priority": 76,
+            "planability": "HOCH",
+            "action": "Gebot liegt aktuell innerhalb unserer Preisgrenze. Nicht unnötig nachbieten; nur Marktwert und Ablauf im Blick behalten.",
+            "reasons": reasons[:3],
+        }
+    return None
+
+
 def build_coach_recommendations(
     market_rows: Iterable[dict],
     squad_rows: Iterable[dict],
@@ -301,13 +372,94 @@ def build_coach_recommendations(
     own_manager_id: str | None = None,
     available_budget: int | None = None,
     portfolio_summary: dict | None = None,
-    limit: int = 12,
+    limit: int = 16,
 ) -> list[dict]:
     managers_list = [dict(m) for m in (managers or [])]
+    market_rows = [dict(r) for r in market_rows]
+    squad_rows = [dict(r) for r in squad_rows]
+    capacity = squad_capacity(squad_rows)
+    open_bids = active_bid_count(market_rows)
     recs: list[dict] = []
+
+    explicit_sale_rows = [
+        row for row in squad_rows
+        if str(row.get("player_role") or row.get("portfolio_role") or row.get("action") or "").upper()
+        in {"TRANSFERLISTE", "ROTATE/SELL", "VERKAUFEN", "VERKAUF WARTEN"}
+    ]
+    sale_name = str((explicit_sale_rows[0] if explicit_sale_rows else {}).get("name") or "").strip()
+
+    if capacity.is_full:
+        recs.append({
+            "kind": "warning",
+            "label": "KADER VOLL",
+            "primary_reason": "18/18 KADERPLÄTZE",
+            "secondary_reason": "KAUF BRAUCHT VERKAUF",
+            "secondary_tags": ["KADER 18/18", "KEIN FREIER SLOT"],
+            "priority": 96,
+            "planability": "HOCH",
+            "action": (f"Vor einem weiteren Kauf zuerst einen Kaderplatz freimachen – aktuell bietet sich {sale_name} als bereits markierter Verkauf an." if sale_name else "Vor einem weiteren Kauf zuerst einen Kaderplatz freimachen. Marktchancen nur als Upgrade zusammen mit einem Verkauf betrachten."),
+            "reasons": ["Kickbase-Kadergrenze: maximal 18 Spieler"],
+            "player_id": None,
+            "name": "Kaderplätze",
+            "club": "",
+            "position": "",
+            "price": 0,
+            "market_value": 0,
+            "source": "Kader",
+            "confidence": "HOCH",
+            "horizon": "JETZT",
+            "raw": {},
+        })
+    elif open_bids > capacity.free:
+        recs.append({
+            "kind": "warning",
+            "label": "KADERPLÄTZE PRÜFEN",
+            "primary_reason": f"{capacity.current}/{MAX_SQUAD_SIZE} SPIELER",
+            "secondary_reason": f"{open_bids} AKTIVE GEBOTE",
+            "secondary_tags": [f"{capacity.free} FREIE PLÄTZE", "GEBOTE KÖNNEN KOLLIDIEREN"],
+            "priority": 93,
+            "planability": "HOCH",
+            "action": f"Du hast {capacity.free} freie Kaderplätze, aber {open_bids} aktive Gebote. Nicht alle Zugänge können ohne zusätzlichen Verkauf gleichzeitig in den Kader.",
+            "reasons": ["Kickbase-Kadergrenze: maximal 18 Spieler"],
+            "player_id": None,
+            "name": "Kaderplätze",
+            "club": "",
+            "position": "",
+            "price": 0,
+            "market_value": 0,
+            "source": "Kader",
+            "confidence": "HOCH",
+            "horizon": "JETZT",
+            "raw": {},
+        })
 
     for raw in market_rows:
         row = dict(raw)
+        bid_advice = _active_bid_advice(row)
+        if bid_advice:
+            if capacity.is_full:
+                bid_advice = dict(bid_advice)
+                bid_advice["label"] = "GEBOT + VERKAUF NÖTIG"
+                bid_advice["primary_reason"] = "KADER 18/18"
+                bid_advice["secondary_reason"] = "KADERPLATZ FREIMACHEN"
+                bid_advice["secondary_tags"] = list(dict.fromkeys(["KADER VOLL", *(bid_advice.get("secondary_tags") or [])]))
+                bid_advice["priority"] = max(90, int(bid_advice.get("priority") or 0))
+                bid_advice["action"] = ((bid_advice.get("action") or "") + (f" Vor Zuschlag {sale_name} verkaufen oder einen anderen Kaderplatz freimachen." if sale_name else " Vor Zuschlag einen Kaderplatz freimachen.")).strip()
+            recs.append({
+                **bid_advice,
+                "player_id": row.get('player_id'),
+                "name": row.get('full_name') or row.get('name') or 'Unbekannter Spieler',
+                "club": row.get('club') or '',
+                "position": row.get('position') or '',
+                "price": int(row.get('price') or 0),
+                "market_value": int(row.get('market_value') or 0),
+                "max_bid": int(row.get('max_bid') or 0),
+                "own_bid": int(row.get('own_bid') or 0),
+                "source": "Eigenes Gebot",
+                "confidence": row.get('confidence_label') or 'MITTEL',
+                "horizon": row.get('investment_horizon') or '',
+                "raw": row,
+            })
         if str(row.get("portfolio_role") or "").upper() == "PASS":
             continue
         if row.get('is_kickbase'):
@@ -320,12 +472,21 @@ def build_coach_recommendations(
             # manager side of the transfer market.
             investment = int(row.get('investment_score') or 0)
             squad_fit = int(row.get('squad_fit_score') or 0)
-            if advice['label'] == 'VERHANDELN' and investment < 75 and squad_fit < 75:
+            if advice['label'] == 'VERHANDELN' and max(investment, squad_fit) < 68:
                 continue
-            if advice['label'] == 'MANAGER-DEAL PRÜFEN' and max(investment, squad_fit) < 72:
+            if advice['label'] == 'MANAGER-DEAL PRÜFEN' and max(investment, squad_fit) < 70:
                 continue
         if not advice:
             continue
+        if capacity.is_full:
+            advice = dict(advice)
+            original_label = str(advice.get("label") or "")
+            if original_label not in {"PASS", "PASSEN"}:
+                advice["label"] = "UPGRADE + VERKAUF"
+                advice["primary_reason"] = "KADER 18/18"
+                advice["secondary_reason"] = "NUR MIT ABGANG"
+                advice["secondary_tags"] = list(dict.fromkeys(["KADER VOLL", *(advice.get("secondary_tags") or [])]))
+                advice["action"] = ((advice.get("action") or "") + (f" Kauf nur zusammen mit Verkauf von {sale_name} oder einem anderen Kaderspieler einplanen." if sale_name else " Kauf nur zusammen mit einem Kaderverkauf einplanen.")).strip()
         recs.append({
             **advice,
             "player_id": row.get('player_id'),
@@ -430,7 +591,7 @@ def build_coach_recommendations(
 
     # Only surface the most useful own-squad hold context; sells remain uncapped.
     own_context_recs.sort(key=lambda r: (-int(r.get("priority") or 0), str(r.get("name") or "").casefold()))
-    recs.extend(own_context_recs[:3])
+    recs.extend(own_context_recs[:6])
 
     summary = dict(portfolio_summary or {})
     legacy_negative_budget = portfolio_summary is None and available_budget is not None and int(available_budget) < 0
@@ -528,7 +689,7 @@ def build_coach_recommendations(
     )
     # Hard cap: manager offers are secondary because they still require explicit
     # acceptance by the selling manager. Only the two strongest survive.
-    selected_manager = manager_deals[:2]
+    selected_manager = manager_deals[:4]
     selected = other_primary + selected_manager
     selected.sort(key=lambda r: (-int(r.get('priority') or 0), str(r.get('name') or '').casefold()))
     return selected[:max(1, int(limit))]

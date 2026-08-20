@@ -12,9 +12,12 @@ POSITION_TARGETS = {"TW": 1, "ABW": 3, "MF": 4, "ST": 3}
 VALID_FORMATIONS = {
     "3-4-3": {"TW": 1, "ABW": 3, "MF": 4, "ST": 3},
     "3-5-2": {"TW": 1, "ABW": 3, "MF": 5, "ST": 2},
+    "3-6-1": {"TW": 1, "ABW": 3, "MF": 6, "ST": 1},
+    "4-2-4": {"TW": 1, "ABW": 4, "MF": 2, "ST": 4},
     "4-3-3": {"TW": 1, "ABW": 4, "MF": 3, "ST": 3},
     "4-4-2": {"TW": 1, "ABW": 4, "MF": 4, "ST": 2},
     "4-5-1": {"TW": 1, "ABW": 4, "MF": 5, "ST": 1},
+    "5-2-3": {"TW": 1, "ABW": 5, "MF": 2, "ST": 3},
     "5-3-2": {"TW": 1, "ABW": 5, "MF": 3, "ST": 2},
     "5-4-1": {"TW": 1, "ABW": 5, "MF": 4, "ST": 1},
 }
@@ -71,12 +74,34 @@ def _num(value: Any) -> float | None:
 
 
 def player_form(performance_payload: Any) -> dict:
-    """Normalize /players/{id}/performance into human-readable form metrics."""
+    """Normalize /players/{id}/performance into human-readable form metrics.
+
+    Kickbase returns multiple seasons. For the in-app form chart we prefer the
+    season containing the current fixture marker (``cur``); if none is marked,
+    the newest season that already contains scored matches is used.
+    """
     groups = performance_payload.get("it", []) if isinstance(performance_payload, dict) else []
+    valid_groups = [group for group in groups if isinstance(group, dict)] if isinstance(groups, list) else []
+
+    selected_group = None
+    for group in reversed(valid_groups):
+        phase = group.get("ph", []) or []
+        if any(isinstance(raw, dict) and raw.get("cur") for raw in phase):
+            selected_group = group
+            break
+    if selected_group is None:
+        for group in reversed(valid_groups):
+            phase = group.get("ph", []) or []
+            if any(isinstance(raw, dict) and _num(raw.get("p")) is not None for raw in phase):
+                selected_group = group
+                break
+
     matches: list[dict] = []
-    for group in groups if isinstance(groups, list) else []:
-        if not isinstance(group, dict):
-            continue
+    groups_to_read = [selected_group] if selected_group is not None else valid_groups[-1:]
+    for group in groups_to_read:
+        season_id = str(group.get("sid") or "")
+        season_title = str(group.get("ti") or "")
+        competition_name = str(group.get("n") or "")
         for raw in group.get("ph", []) or []:
             if not isinstance(raw, dict):
                 continue
@@ -84,13 +109,20 @@ def player_form(performance_payload: Any) -> dict:
             if points is None:
                 continue
             matches.append({
+                "match_id": str(raw.get("mi") or ""),
                 "day": int(raw.get("day") or 0),
                 "points": int(points),
+                "minutes": raw.get("mp"),
                 "opponent_home": raw.get("t1"),
                 "opponent_away": raw.get("t2"),
+                "home_goals": raw.get("t1g"),
+                "away_goals": raw.get("t2g"),
                 "match_date": raw.get("md"),
                 "current": bool(raw.get("cur")),
                 "status": raw.get("st"),
+                "season_id": season_id,
+                "season_title": season_title,
+                "competition_name": competition_name,
             })
     matches.sort(key=lambda x: x["day"])
     values = [m["points"] for m in matches]
@@ -108,47 +140,128 @@ def player_form(performance_payload: Any) -> dict:
         ordered = sorted(data)
         if len(ordered) == 1:
             return float(ordered[0])
-        position = (len(ordered) - 1) * q
-        low = int(position)
-        high = min(low + 1, len(ordered) - 1)
-        fraction = position - low
-        return ordered[low] + (ordered[high] - ordered[low]) * fraction
+        idx = (len(ordered) - 1) * q
+        lower = int(idx)
+        upper = min(lower + 1, len(ordered) - 1)
+        frac = idx - lower
+        return ordered[lower] * (1.0 - frac) + ordered[upper] * frac
 
+    med = percentile(values, 0.5)
     p25 = percentile(values, 0.25)
     p75 = percentile(values, 0.75)
-    p90 = percentile(values, 0.90)
-    med = median(values) if values else None
+    p90 = percentile(values, 0.9)
     hit70 = (sum(1 for value in values if value >= 70) / len(values) * 100.0) if values else None
     hit100 = (sum(1 for value in values if value >= 100) / len(values) * 100.0) if values else None
-    cv = (volatility / avg5) if volatility is not None and avg5 not in (None, 0) else None
-    if cv is None:
-        risk = "–"
-    elif cv <= 0.22:
-        risk = "STABIL"
-    elif cv <= 0.45:
-        risk = "VARIABEL"
-    else:
-        risk = "VOLATIL"
+    risk = None
+    if avg is not None and volatility is not None:
+        risk = max(0.0, volatility / max(1.0, abs(avg)))
+
     return {
         "matches": matches,
         "avg": avg,
-        "median": med,
-        "avg3": avg3,
         "avg5": avg5,
-        "volatility": volatility,
-        "coefficient_of_variation": cv,
+        "avg3": avg3,
         "trend": trend,
-        # Robust floor/ceiling are more useful than single-match extremes.
+        "volatility": volatility,
         "floor": min(values) if values else None,
         "ceiling": max(values) if values else None,
+        "median": med,
         "robust_floor": p25,
-        "robust_ceiling": p90,
-        "p25": p25,
+        "robust_ceiling": p75,
         "p75": p75,
         "p90": p90,
         "hit70": hit70,
         "hit100": hit100,
         "risk": risk,
+    }
+
+
+def normalize_event_types(payload: Any) -> dict[str, str]:
+    """Return Kickbase event-type labels keyed by their event type id.
+
+    The live endpoint has been observed with ``i`` (id) and ``ti`` (title), but
+    this parser intentionally accepts common wrapper keys so a small response
+    shape change does not break the feature.
+    """
+    items: list[Any] = []
+    if isinstance(payload, list):
+        items = payload
+    elif isinstance(payload, dict):
+        for key in ("it", "items", "value", "eventTypes", "eventtypes", "types"):
+            value = payload.get(key)
+            if isinstance(value, list):
+                items = value
+                break
+            if isinstance(value, dict):
+                nested = normalize_event_types(value)
+                if nested:
+                    return nested
+        if not items and payload.get("i") is not None:
+            items = [payload]
+
+    result: dict[str, str] = {}
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        raw_id = item.get("i", item.get("id", item.get("eti")))
+        raw_title = item.get("ti", item.get("title", item.get("name", item.get("n"))))
+        if raw_id is None or raw_title is None:
+            continue
+        title = str(raw_title).strip()
+        if title:
+            result[str(raw_id)] = title
+    return result
+
+
+def normalize_match_events(payload: Any, event_types: dict[str, str] | None = None) -> dict:
+    """Normalize a playercenter match payload for the point-breakdown dialog."""
+    data = payload if isinstance(payload, dict) else {}
+    labels = event_types or {}
+    events: list[dict] = []
+    for raw in data.get("events", []) or []:
+        if not isinstance(raw, dict):
+            continue
+        try:
+            points = int(raw.get("p") or 0)
+        except (TypeError, ValueError):
+            points = 0
+        try:
+            minute = int(raw.get("mt") or 0)
+        except (TypeError, ValueError):
+            minute = 0
+        event_type_id = str(raw.get("eti") if raw.get("eti") is not None else "")
+        events.append({
+            "event_id": str(raw.get("ei") or ""),
+            "event_type_id": event_type_id,
+            "label": labels.get(event_type_id) or (f"Event {event_type_id}" if event_type_id else "Event"),
+            "points": points,
+            "minute": minute,
+            "attribute": raw.get("att"),
+            "key_event": raw.get("ke"),
+            "detail": raw.get("ddp") if isinstance(raw.get("ddp"), dict) else {},
+        })
+    events.sort(key=lambda event: (event["minute"], event["event_id"]), reverse=True)
+    point_events = [event for event in events if event["points"] != 0]
+    try:
+        total_points = int(data.get("p")) if data.get("p") is not None else None
+    except (TypeError, ValueError):
+        total_points = None
+    event_points = sum(event["points"] for event in point_events)
+    return {
+        "player_id": str(data.get("i") or ""),
+        "player_name": str(data.get("n") or ""),
+        "match_id": str(data.get("mi") or ""),
+        "home_team": data.get("t1"),
+        "away_team": data.get("t2"),
+        "home_goals": data.get("t1g"),
+        "away_goals": data.get("t2g"),
+        "minutes": data.get("mt"),
+        "match_date": data.get("md"),
+        "total_points": total_points,
+        "event_points": event_points,
+        "unmapped_points": (total_points - event_points) if total_points is not None else None,
+        "events": events,
+        "point_events": point_events,
     }
 
 
@@ -317,8 +430,24 @@ def trade_profile(transfers: list[dict]) -> dict:
     }
 
 
-def optimize_lineup(players: list[dict], form_by_player: dict[str, dict] | None = None, fixture_by_team: dict[str, list[dict]] | None = None, *, points_are_current: bool = True) -> dict:
-    """Read-only XI optimizer. Uses current squad only; never writes to Kickbase."""
+def optimize_lineup(
+    players: list[dict],
+    form_by_player: dict[str, dict] | None = None,
+    fixture_by_team: dict[str, list[dict]] | None = None,
+    *,
+    points_are_current: bool = True,
+    formation: str | None = None,
+) -> dict:
+    """Read-only XI optimizer. Uses current squad only; never writes to Kickbase.
+
+    ``formation=None`` keeps AUTO mode and selects the strongest legal formation.
+    Passing a formation forces exactly that positional shape. If the current squad
+    cannot field it, the result is marked infeasible instead of silently falling
+    back to another system.
+    """
+    if formation is not None and formation not in VALID_FORMATIONS:
+        raise ValueError(f"Unsupported Kickbase formation: {formation}")
+
     form_by_player = form_by_player or {}
     fixture_by_team = fixture_by_team or {}
     scored = []
@@ -362,34 +491,56 @@ def optimize_lineup(players: list[dict], form_by_player: dict[str, dict] | None 
     for values in by_pos.values():
         values.sort(key=lambda p: p["optimizer_score"], reverse=True)
 
-    # Evaluate every supported Kickbase formation and choose the strongest one
-    # that can actually be fielded by the current squad. This keeps the label
-    # and the selected XI in sync (e.g. 3 ABW / 5 MF / 2 ST => 3-5-2).
+    formations = {formation: VALID_FORMATIONS[formation]} if formation else VALID_FORMATIONS
     candidates: list[tuple[float, str, list[dict]]] = []
-    for formation, targets in VALID_FORMATIONS.items():
-        if any(len(by_pos.get(pos, [])) < count for pos, count in targets.items()):
+    missing_by_formation: dict[str, dict[str, int]] = {}
+    for formation_name, targets in formations.items():
+        missing = {
+            pos: count - len(by_pos.get(pos, []))
+            for pos, count in targets.items()
+            if len(by_pos.get(pos, [])) < count
+        }
+        if missing:
+            missing_by_formation[formation_name] = missing
             continue
         lineup: list[dict] = []
         for pos, count in targets.items():
             lineup.extend(by_pos[pos][:count])
         lineup_score = mean([p["optimizer_score"] for p in lineup]) if lineup else 0.0
-        candidates.append((lineup_score, formation, lineup))
+        candidates.append((lineup_score, formation_name, lineup))
 
     if candidates:
-        lineup_score, formation, chosen = max(candidates, key=lambda item: item[0])
+        lineup_score, selected_formation, chosen = max(candidates, key=lambda item: item[0])
+        feasible = True
+        missing = {}
+    elif formation is not None:
+        # A manually selected formation must never morph into a different one.
+        selected_formation = formation
+        chosen = []
+        lineup_score = 0.0
+        feasible = False
+        missing = missing_by_formation.get(formation, {})
     else:
-        # No legal XI can be formed yet. Keep the best position-respecting
-        # partial lineup instead of pretending that an invalid formation is valid.
+        # AUTO only: no legal XI can be formed yet. Keep the best partial lineup
+        # as a diagnostic preview without pretending that it is legal.
         chosen = []
         for pos in ("TW", "ABW", "MF", "ST"):
             chosen.extend(by_pos.get(pos, []))
         chosen = sorted(chosen, key=lambda p: p["optimizer_score"], reverse=True)[:11]
         counts = {pos: sum(1 for p in chosen if str(p.get("position")) == pos) for pos in ("ABW", "MF", "ST")}
-        formation = f"{counts['ABW']}-{counts['MF']}-{counts['ST']} (unvollständig)"
+        selected_formation = f"{counts['ABW']}-{counts['MF']}-{counts['ST']} (unvollständig)"
         lineup_score = mean([p["optimizer_score"] for p in chosen]) if chosen else 0.0
+        feasible = False
+        missing = {}
 
     chosen.sort(key=lambda p: (POSITION_ORDER.get(str(p.get("position")), 9), -p["optimizer_score"]))
-    return {"players": chosen, "formation": formation, "score": round(lineup_score, 1)}
+    return {
+        "players": chosen,
+        "formation": selected_formation,
+        "score": round(lineup_score, 1),
+        "feasible": feasible,
+        "missing": missing,
+    }
 
 
 def parse_activity_feed(payload: Any) -> list[dict]:

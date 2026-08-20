@@ -5,7 +5,8 @@ import platform
 import sqlite3
 import json
 import threading
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, time, timedelta
+from zoneinfo import ZoneInfo
 from pathlib import Path
 
 from app.teams import TEAM_NAMES
@@ -37,6 +38,27 @@ def app_data_dir() -> Path:
     path = base / "KickTrack"
     path.mkdir(parents=True, exist_ok=True)
     return path
+
+
+def bundled_assets_dir() -> Path:
+    """Return the source/PyInstaller assets directory.
+
+    PyInstaller rewrites ``__file__`` into its bundle root, so resolving from
+    this module works both from source and from an onedir distribution.
+    """
+    return Path(__file__).resolve().parent.parent / "assets"
+
+
+def bundled_portrait_path(player_id: str) -> Path | None:
+    portrait_dir = bundled_assets_dir() / "portraits"
+    pid = str(player_id).strip()
+    if not pid or not portrait_dir.exists():
+        return None
+    for suffix in (".png", ".webp", ".jpg", ".jpeg"):
+        candidate = portrait_dir / f"{pid}{suffix}"
+        if candidate.exists() and candidate.stat().st_size > 0:
+            return candidate
+    return None
 
 
 DB_PATH = app_data_dir() / "kicktrack.db"
@@ -223,6 +245,74 @@ class Storage:
                 created_at TEXT NOT NULL,
                 PRIMARY KEY(league_id, player_id, decision_date)
             );
+
+            CREATE TABLE IF NOT EXISTS player_master(
+                player_id TEXT PRIMARY KEY,
+                name TEXT NOT NULL,
+                full_name TEXT,
+                club TEXT,
+                team_id TEXT,
+                position TEXT,
+                active_state TEXT NOT NULL DEFAULT 'ACTIVE',
+                miss_count INTEGER NOT NULL DEFAULT 0,
+                first_seen_at TEXT NOT NULL,
+                last_seen_at TEXT NOT NULL,
+                last_sync_at TEXT NOT NULL,
+                market_value INTEGER,
+                points_total INTEGER,
+                average_points INTEGER,
+                fotmob_id TEXT,
+                portrait_url TEXT,
+                portrait_path TEXT,
+                portrait_state TEXT NOT NULL DEFAULT 'MISSING',
+                portrait_confidence INTEGER,
+                portrait_reason TEXT,
+                portrait_candidate_name TEXT,
+                portrait_candidate_team TEXT,
+                portrait_candidate_position TEXT,
+                portrait_candidate_shirt_number TEXT,
+                portrait_checked_at TEXT
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_player_master_active
+                ON player_master(active_state);
+            CREATE INDEX IF NOT EXISTS idx_player_master_portrait
+                ON player_master(portrait_state);
+
+            CREATE TABLE IF NOT EXISTS watchlist(
+                league_id TEXT NOT NULL,
+                player_id TEXT NOT NULL,
+                added_at TEXT NOT NULL,
+                PRIMARY KEY(league_id, player_id)
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_watchlist_league
+                ON watchlist(league_id, added_at DESC);
+
+            CREATE TABLE IF NOT EXISTS mv_predictions(
+                league_id TEXT NOT NULL,
+                player_id TEXT NOT NULL,
+                target_date TEXT NOT NULL,
+                predicted_at TEXT NOT NULL,
+                baseline_value INTEGER NOT NULL,
+                baseline_delta INTEGER,
+                predicted_delta INTEGER NOT NULL,
+                expected_value INTEGER NOT NULL,
+                low_delta INTEGER,
+                high_delta INTEGER,
+                confidence TEXT,
+                sample_count INTEGER,
+                history_days INTEGER,
+                method TEXT,
+                prediction_source TEXT,
+                actual_value INTEGER,
+                actual_delta INTEGER,
+                absolute_error INTEGER,
+                signed_error INTEGER,
+                direction_hit INTEGER,
+                evaluated_at TEXT,
+                PRIMARY KEY(league_id, player_id, target_date)
+            );
             """
         )
 
@@ -230,6 +320,11 @@ class Storage:
         self._ensure_column("players", "entry_value", "INTEGER")
         self._ensure_column("players", "purchase_price", "INTEGER")
         self._ensure_column("players", "purchase_date", "TEXT")
+        self._ensure_column("market_values", "source", "TEXT")
+        self._ensure_column("mv_predictions", "actual_snapshot_date", "TEXT")
+        self._ensure_column("mv_predictions", "actual_recorded_at", "TEXT")
+        self._ensure_column("mv_predictions", "evaluation_source", "TEXT")
+        self._ensure_column("mv_predictions", "prediction_source", "TEXT")
         self._ensure_column("players", "origin", "TEXT DEFAULT 'UNKNOWN'")
         self._ensure_column("players", "player_status", "TEXT DEFAULT 'KADER'")
         self._ensure_column("players", "daily_change", "INTEGER")
@@ -241,6 +336,10 @@ class Storage:
         self._ensure_column("players", "average_points", "INTEGER")
         self._ensure_column("players", "player_role", "TEXT DEFAULT 'OFFEN'")
         self.conn.execute("UPDATE players SET player_role = 'OFFEN' WHERE player_role IS NULL OR player_role = ''")
+        self._ensure_column("player_master", "portrait_candidate_name", "TEXT")
+        self._ensure_column("player_master", "portrait_candidate_team", "TEXT")
+        self._ensure_column("player_master", "portrait_candidate_position", "TEXT")
+        self._ensure_column("player_master", "portrait_candidate_shirt_number", "TEXT")
         self._ensure_column("market_values", "snapshot_date", "TEXT")
 
         self.conn.execute(
@@ -300,6 +399,18 @@ class Storage:
             """
             CREATE INDEX IF NOT EXISTS idx_league_manager_players_owner
             ON league_manager_players(league_id, manager_id)
+            """
+        )
+        self.conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_mv_predictions_target
+            ON mv_predictions(league_id, target_date DESC)
+            """
+        )
+        self.conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_mv_predictions_evaluated
+            ON mv_predictions(league_id, evaluated_at, target_date DESC)
             """
         )
 
@@ -417,6 +528,304 @@ class Storage:
             "buy_count": len(buy_returns),
             "pass_count": len(pass_returns),
         }
+
+    # ------------------------------------------------------------------
+    # Market-value prediction tracking / model evaluation
+    # ------------------------------------------------------------------
+
+    def record_mv_predictions(
+        self,
+        league_id: str,
+        predictions: dict[str, dict],
+        *,
+        current_values: dict[str, int],
+        current_deltas: dict[str, int] | None = None,
+        target_date: str | date,
+        sources: dict[str, str] | None = None,
+    ) -> int:
+        """Store the latest pre-refresh forecast for each player/target day.
+
+        Repeated refreshes before 22:00 intentionally replace the earlier forecast
+        for the same player/day. That means evaluation measures the prediction the
+        user actually saw closest to the market-value refresh.
+        """
+        if isinstance(target_date, date):
+            target = target_date.isoformat()
+        else:
+            target = str(target_date)[:10]
+            date.fromisoformat(target)  # validate
+
+        now = datetime.now(UTC).replace(microsecond=0).isoformat()
+        current_deltas = {str(k): int(v) for k, v in (current_deltas or {}).items() if v is not None}
+        sources = {str(k): str(v) for k, v in (sources or {}).items() if v}
+        payload = []
+        for player_id, raw in (predictions or {}).items():
+            pid = str(player_id)
+            if pid not in current_values:
+                continue
+            try:
+                baseline = int(current_values[pid])
+                pred_delta = int(raw.get("delta"))
+                expected = int(raw.get("expected_value"))
+            except (TypeError, ValueError):
+                continue
+            if baseline <= 0 or expected <= 0:
+                continue
+            payload.append((
+                str(league_id), pid, target, now, baseline,
+                current_deltas.get(pid, raw.get("baseline_delta")), pred_delta, expected,
+                int(raw.get("low_delta")) if raw.get("low_delta") is not None else None,
+                int(raw.get("high_delta")) if raw.get("high_delta") is not None else None,
+                str(raw.get("confidence") or ""),
+                int(raw.get("sample_count") or 0),
+                int(raw.get("history_days") or 0),
+                str(raw.get("method") or ""),
+                sources.get(pid, "MARKET"),
+            ))
+        if not payload:
+            return 0
+        with self.conn:
+            self.conn.executemany(
+                """
+                INSERT INTO mv_predictions(
+                    league_id, player_id, target_date, predicted_at,
+                    baseline_value, baseline_delta, predicted_delta, expected_value,
+                    low_delta, high_delta, confidence, sample_count, history_days, method, prediction_source
+                ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(league_id, player_id, target_date) DO UPDATE SET
+                    predicted_at=excluded.predicted_at,
+                    baseline_value=excluded.baseline_value,
+                    baseline_delta=excluded.baseline_delta,
+                    predicted_delta=excluded.predicted_delta,
+                    expected_value=excluded.expected_value,
+                    low_delta=excluded.low_delta,
+                    high_delta=excluded.high_delta,
+                    confidence=excluded.confidence,
+                    sample_count=excluded.sample_count,
+                    history_days=excluded.history_days,
+                    method=excluded.method,
+                    prediction_source=excluded.prediction_source,
+                    actual_value=NULL,
+                    actual_delta=NULL,
+                    absolute_error=NULL,
+                    signed_error=NULL,
+                    direction_hit=NULL,
+                    evaluated_at=NULL
+                """,
+                payload,
+            )
+        return len(payload)
+
+    @staticmethod
+    def _parse_recorded_at(value: str | None) -> datetime | None:
+        text = str(value or "").strip()
+        if not text or len(text) <= 10:
+            return None
+        try:
+            parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+        except ValueError:
+            return None
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=UTC)
+        return parsed.astimezone(UTC)
+
+    @staticmethod
+    def _looks_like_legacy_live_observation(recorded_at: str | None) -> bool:
+        """Recognise live observations written before market_values.source existed.
+
+        Historical fallback rows created by KickTrack use exactly noon UTC, while
+        date-only/midnight rows are also not trustworthy as an observed refresh.
+        A real app snapshot carries the actual wall-clock time.
+        """
+        parsed = Storage._parse_recorded_at(recorded_at)
+        if parsed is None:
+            return False
+        clock = parsed.timetz().replace(tzinfo=None)
+        return clock not in {time(0, 0), time(12, 0)}
+
+    def _prediction_actual_observation(self, player_id: str, target_date: str) -> dict | None:
+        """Return the first trustworthy observation after the target 22:00 refresh.
+
+        A prediction for 15 Aug targets the 15 Aug 22:00 Europe/Berlin refresh.
+        If KickTrack is not opened again until the morning of 16 Aug, that morning
+        observation still represents the 15 Aug refresh and is therefore valid.
+        Pre-refresh observations from 15 Aug must never be used as the outcome.
+        """
+        target_day = date.fromisoformat(str(target_date)[:10])
+        berlin = ZoneInfo("Europe/Berlin")
+        refresh_local = datetime.combine(target_day, time(22, 0), tzinfo=berlin)
+        next_refresh_local = datetime.combine(target_day + timedelta(days=1), time(22, 0), tzinfo=berlin)
+        refresh_utc = refresh_local.astimezone(UTC)
+        next_refresh_utc = next_refresh_local.astimezone(UTC)
+        end_day = (target_day + timedelta(days=1)).isoformat()
+        rows = self.conn.execute(
+            """
+            SELECT value, snapshot_date, recorded_at, source
+            FROM market_values
+            WHERE player_id = ? AND snapshot_date BETWEEN ? AND ?
+            ORDER BY recorded_at ASC, id ASC
+            """,
+            (str(player_id), target_day.isoformat(), end_day),
+        ).fetchall()
+        candidates = []
+        for row in rows:
+            observed_at = self._parse_recorded_at(row["recorded_at"])
+            if observed_at is None or observed_at < refresh_utc or observed_at >= next_refresh_utc:
+                continue
+            source = str(row["source"] or "").lower()
+            if source != "live" and not (not source and self._looks_like_legacy_live_observation(row["recorded_at"])):
+                continue
+            value = int(row["value"] or 0)
+            if value <= 0:
+                continue
+            candidates.append({
+                "value": value,
+                "snapshot_date": str(row["snapshot_date"] or ""),
+                "recorded_at": str(row["recorded_at"] or ""),
+                "source": source or "legacy-live",
+                "observed_at": observed_at,
+            })
+        return min(candidates, key=lambda item: item["observed_at"]) if candidates else None
+
+    def evaluate_mv_predictions(self, league_id: str, *, through_date: str | date) -> int:
+        """Evaluate forecasts only against an observation made after 22:00.
+
+        Older KickTrack builds matched solely on ``snapshot_date``.  A value read
+        before 22:00 could therefore be mistaken for that night's completed
+        refresh.  We deliberately re-audit *all* eligible rows here so existing
+        bad evaluations are repaired (or cleared if no trustworthy outcome was
+        captured).
+        """
+        if isinstance(through_date, date):
+            through = through_date.isoformat()
+        else:
+            through = str(through_date)[:10]
+            date.fromisoformat(through)
+        rows = self.conn.execute(
+            """
+            SELECT league_id, player_id, target_date, baseline_value, predicted_delta
+            FROM mv_predictions
+            WHERE league_id = ? AND target_date <= ?
+            ORDER BY target_date ASC
+            """,
+            (str(league_id), through),
+        ).fetchall()
+        now = datetime.now(UTC).replace(microsecond=0).isoformat()
+        updates = []
+        clears = []
+        for row in rows:
+            actual = self._prediction_actual_observation(str(row["player_id"]), str(row["target_date"]))
+            key = (str(row["league_id"]), str(row["player_id"]), str(row["target_date"]))
+            if not actual:
+                clears.append(key)
+                continue
+            actual_value = int(actual["value"] or 0)
+            baseline = int(row["baseline_value"] or 0)
+            predicted_delta = int(row["predicted_delta"] or 0)
+            if actual_value <= 0 or baseline <= 0:
+                clears.append(key)
+                continue
+            actual_delta = actual_value - baseline
+            signed_error = predicted_delta - actual_delta
+            absolute_error = abs(signed_error)
+            pred_sign = 1 if predicted_delta > 0 else (-1 if predicted_delta < 0 else 0)
+            actual_sign = 1 if actual_delta > 0 else (-1 if actual_delta < 0 else 0)
+            direction_hit = 1 if pred_sign == actual_sign else 0
+            updates.append((
+                actual_value, actual_delta, absolute_error, signed_error, direction_hit, now,
+                actual["snapshot_date"], actual["recorded_at"], actual["source"], *key,
+            ))
+        with self.conn:
+            if clears:
+                self.conn.executemany(
+                    """
+                    UPDATE mv_predictions
+                    SET actual_value=NULL, actual_delta=NULL, absolute_error=NULL, signed_error=NULL,
+                        direction_hit=NULL, evaluated_at=NULL, actual_snapshot_date=NULL,
+                        actual_recorded_at=NULL, evaluation_source=NULL
+                    WHERE league_id=? AND player_id=? AND target_date=?
+                    """,
+                    clears,
+                )
+            if updates:
+                self.conn.executemany(
+                    """
+                    UPDATE mv_predictions
+                    SET actual_value=?, actual_delta=?, absolute_error=?, signed_error=?,
+                        direction_hit=?, evaluated_at=?, actual_snapshot_date=?, actual_recorded_at=?,
+                        evaluation_source=?
+                    WHERE league_id=? AND player_id=? AND target_date=?
+                    """,
+                    updates,
+                )
+        return len(updates)
+
+    def mv_prediction_summary(self, league_id: str, *, limit_days: int = 30) -> dict:
+        """Return transparent quality metrics for evaluated 22:00 forecasts."""
+        cutoff = (date.today() - timedelta(days=max(1, int(limit_days)))).isoformat()
+        rows = self.conn.execute(
+            """
+            SELECT predicted_delta, actual_delta, absolute_error, signed_error,
+                   direction_hit, confidence, target_date
+            FROM mv_predictions
+            WHERE league_id = ?
+              AND evaluated_at IS NOT NULL
+              AND baseline_delta IS NOT NULL
+              AND target_date >= ?
+            ORDER BY target_date DESC
+            """,
+            (str(league_id), cutoff),
+        ).fetchall()
+        if not rows:
+            return {
+                "evaluated": 0, "direction_hits": 0, "direction_hit_rate": None,
+                "mae": None, "median_abs_error": None, "bias": None,
+                "within_100k_rate": None, "high_confidence_hit_rate": None,
+            }
+        errors = sorted(int(row["absolute_error"] or 0) for row in rows)
+        n = len(errors)
+        median_error = errors[n // 2] if n % 2 else int(round((errors[n // 2 - 1] + errors[n // 2]) / 2))
+        hits = sum(int(row["direction_hit"] or 0) for row in rows)
+        within = sum(1 for error in errors if error <= 100_000)
+        signed = [int(row["signed_error"] or 0) for row in rows]
+        high = [row for row in rows if str(row["confidence"] or "").upper() == "HOCH"]
+        high_hits = sum(int(row["direction_hit"] or 0) for row in high)
+        return {
+            "evaluated": n,
+            "direction_hits": hits,
+            "direction_hit_rate": hits / n * 100.0,
+            "mae": sum(errors) / n,
+            "median_abs_error": median_error,
+            "bias": sum(signed) / n,
+            "within_100k_rate": within / n * 100.0,
+            "high_confidence_hit_rate": (high_hits / len(high) * 100.0) if high else None,
+            "high_confidence_count": len(high),
+        }
+
+    def mv_prediction_rows(self, league_id: str, *, limit: int = 100) -> list[dict]:
+        rows = self.conn.execute(
+            """
+            SELECT * FROM mv_predictions
+            WHERE league_id = ?
+            ORDER BY target_date DESC, predicted_at DESC
+            LIMIT ?
+            """,
+            (str(league_id), max(1, int(limit))),
+        ).fetchall()
+        return [dict(row) for row in rows]
+
+    def mv_predictions_for_target(self, league_id: str, target_date: str | date) -> dict[str, dict]:
+        """Return already stored forecasts for one refresh day keyed by player id."""
+        target = target_date.isoformat() if isinstance(target_date, date) else str(target_date)[:10]
+        rows = self.conn.execute(
+            """
+            SELECT * FROM mv_predictions
+            WHERE league_id = ? AND target_date = ?
+            ORDER BY predicted_at DESC
+            """,
+            (str(league_id), target),
+        ).fetchall()
+        return {str(row["player_id"]): dict(row) for row in rows}
 
     # ------------------------------------------------------------------
     # Settings
@@ -543,6 +952,52 @@ class Storage:
         )
         self.conn.commit()
 
+    def set_watchlisted(self, league_id: str, player_id: str, enabled: bool) -> None:
+        league_id = str(league_id or "").strip()
+        player_id = str(player_id or "").strip()
+        if not league_id or not player_id:
+            return
+        if enabled:
+            self.conn.execute(
+                "INSERT OR REPLACE INTO watchlist(league_id, player_id, added_at) VALUES(?, ?, ?)",
+                (league_id, player_id, datetime.now(UTC).replace(microsecond=0).isoformat()),
+            )
+        else:
+            self.conn.execute(
+                "DELETE FROM watchlist WHERE league_id = ? AND player_id = ?",
+                (league_id, player_id),
+            )
+        self.conn.commit()
+
+    def is_watchlisted(self, league_id: str, player_id: str) -> bool:
+        row = self.conn.execute(
+            "SELECT 1 FROM watchlist WHERE league_id = ? AND player_id = ? LIMIT 1",
+            (str(league_id or ""), str(player_id or "")),
+        ).fetchone()
+        return row is not None
+
+    def watchlist_ids(self, league_id: str) -> set[str]:
+        rows = self.conn.execute(
+            "SELECT player_id FROM watchlist WHERE league_id = ? ORDER BY added_at DESC",
+            (str(league_id or ""),),
+        ).fetchall()
+        return {str(row["player_id"]) for row in rows}
+
+    def watchlist_rows(self, league_id: str) -> list[dict]:
+        rows = self.conn.execute(
+            """
+            SELECT w.league_id, w.player_id, w.added_at,
+                   pm.name, pm.full_name, pm.club, pm.team_id, pm.position,
+                   pm.market_value, pm.points_total, pm.average_points, pm.active_state
+            FROM watchlist w
+            LEFT JOIN player_master pm ON pm.player_id = w.player_id
+            WHERE w.league_id = ?
+            ORDER BY w.added_at DESC
+            """,
+            (str(league_id or ""),),
+        ).fetchall()
+        return [dict(row) for row in rows]
+
     def current_players(self) -> list[dict]:
         rows = self.conn.execute(
             """
@@ -574,51 +1029,517 @@ class Storage:
         return dict(row) if row else None
 
     # ------------------------------------------------------------------
+    # Competition player master / portraits
+    # ------------------------------------------------------------------
+
+    def portrait_cache_dir(self) -> Path:
+        path = self.db_path.parent / "player_portraits"
+        path.mkdir(parents=True, exist_ok=True)
+        return path
+
+    def sync_player_master(self, players: list[dict], *, missing_threshold: int = 3) -> dict:
+        """Merge a complete Kickbase competition player snapshot.
+
+        Missing players are not deleted. They first become UNKNOWN and only
+        become LEFT_LEAGUE after several complete snapshots, which protects us
+        from a transient/incomplete API response.
+        """
+        now = datetime.now(UTC).replace(microsecond=0).isoformat()
+        incoming = {str(row.get("player_id")): row for row in players or [] if row.get("player_id") is not None}
+        if not incoming:
+            return {"seen": 0, "new": 0, "active": 0, "unknown": 0, "left": 0}
+
+        existing = {
+            str(row["player_id"]): dict(row)
+            for row in self.conn.execute("SELECT * FROM player_master").fetchall()
+        }
+        new_count = 0
+
+        with self.conn:
+            for player_id, row in incoming.items():
+                old = existing.get(player_id)
+                if old is None:
+                    new_count += 1
+                name = str(row.get("name") or row.get("full_name") or f"Spieler {player_id}")
+                full_name = str(row.get("full_name") or name)
+                self.conn.execute(
+                    """
+                    INSERT INTO player_master(
+                        player_id, name, full_name, club, team_id, position,
+                        active_state, miss_count, first_seen_at, last_seen_at, last_sync_at,
+                        market_value, points_total, average_points, portrait_state
+                    )
+                    VALUES(?, ?, ?, ?, ?, ?, 'ACTIVE', 0, ?, ?, ?, ?, ?, ?, 'MISSING')
+                    ON CONFLICT(player_id) DO UPDATE SET
+                        name = excluded.name,
+                        full_name = excluded.full_name,
+                        club = excluded.club,
+                        team_id = excluded.team_id,
+                        position = excluded.position,
+                        active_state = 'ACTIVE',
+                        miss_count = 0,
+                        last_seen_at = excluded.last_seen_at,
+                        last_sync_at = excluded.last_sync_at,
+                        market_value = excluded.market_value,
+                        points_total = excluded.points_total,
+                        average_points = excluded.average_points
+                    """,
+                    (
+                        player_id, name, full_name, row.get("club"), row.get("team_id"),
+                        normalize_position(row.get("position")), now, now, now,
+                        row.get("market_value"), row.get("points_total"), row.get("average_points"),
+                    ),
+                )
+
+                # A release build may ship already-cached portraits in
+                # assets/portraits. Adopt them automatically without
+                # overwriting a newer local cached portrait.
+                bundled = bundled_portrait_path(player_id)
+                if bundled is not None:
+                    current_portrait = self.conn.execute(
+                        "SELECT portrait_state, portrait_path FROM player_master WHERE player_id = ?",
+                        (player_id,),
+                    ).fetchone()
+                    local_cached = False
+                    if current_portrait and current_portrait["portrait_state"] == "CACHED" and current_portrait["portrait_path"]:
+                        try:
+                            local_cached = Path(str(current_portrait["portrait_path"])).exists()
+                        except OSError:
+                            local_cached = False
+                    if not local_cached:
+                        self.conn.execute(
+                            "UPDATE player_master SET portrait_state = 'CACHED', portrait_path = ? WHERE player_id = ?",
+                            (str(bundled), player_id),
+                        )
+
+            missing_ids = [player_id for player_id in existing if player_id not in incoming]
+            for player_id in missing_ids:
+                old = existing[player_id]
+                misses = int(old.get("miss_count") or 0) + 1
+                state = "LEFT_LEAGUE" if misses >= max(1, int(missing_threshold)) else "UNKNOWN"
+                self.conn.execute(
+                    "UPDATE player_master SET active_state = ?, miss_count = ?, last_sync_at = ? WHERE player_id = ?",
+                    (state, misses, now, player_id),
+                )
+
+        counts = self.player_master_stats()
+        return {
+            "seen": len(incoming),
+            "new": new_count,
+            "new_ids": [player_id for player_id in incoming if player_id not in existing],
+            "active": counts.get("active", 0),
+            "unknown": counts.get("unknown", 0),
+            "left": counts.get("left", 0),
+        }
+
+    def player_master_rows(self, *, state: str | None = None) -> list[dict]:
+        if state:
+            rows = self.conn.execute(
+                "SELECT * FROM player_master WHERE active_state = ? ORDER BY club COLLATE NOCASE, full_name COLLATE NOCASE",
+                (state,),
+            ).fetchall()
+        else:
+            rows = self.conn.execute(
+                "SELECT * FROM player_master ORDER BY active_state, club COLLATE NOCASE, full_name COLLATE NOCASE"
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def player_master_row(self, player_id: str) -> dict | None:
+        row = self.conn.execute(
+            "SELECT * FROM player_master WHERE player_id = ?", (str(player_id),)
+        ).fetchone()
+        return dict(row) if row else None
+
+    def enrich_player_master_identity(self, player_id: str, details: dict) -> dict | None:
+        """Persist richer Kickbase player-detail identity data without touching portrait state."""
+        player_id = str(player_id)
+        current = self.player_master_row(player_id)
+        if not current or not isinstance(details, dict):
+            return current
+
+        name = str(details.get("name") or current.get("name") or "").strip()
+        full_name = str(details.get("full_name") or name or current.get("full_name") or "").strip()
+        club = str(details.get("club") or current.get("club") or "").strip()
+        position = normalize_position(details.get("position") or current.get("position"))
+        market_value = details.get("market_value")
+        points_total = details.get("points_total")
+        average_points = details.get("average_points")
+
+        with self.conn:
+            self.conn.execute(
+                """
+                UPDATE player_master
+                SET name = ?,
+                    full_name = ?,
+                    club = ?,
+                    team_id = COALESCE(?, team_id),
+                    position = ?,
+                    market_value = COALESCE(?, market_value),
+                    points_total = COALESCE(?, points_total),
+                    average_points = COALESCE(?, average_points)
+                WHERE player_id = ?
+                """,
+                (
+                    name or current.get("name"),
+                    full_name or current.get("full_name"),
+                    club or current.get("club"),
+                    details.get("team_id"),
+                    position or current.get("position"),
+                    market_value,
+                    points_total,
+                    average_points,
+                    player_id,
+                ),
+            )
+        return self.player_master_row(player_id)
+
+    def player_master_stats(self) -> dict:
+        row = self.conn.execute(
+            """
+            SELECT
+                COUNT(*) AS total,
+                SUM(CASE WHEN active_state = 'ACTIVE' THEN 1 ELSE 0 END) AS active,
+                SUM(CASE WHEN active_state = 'UNKNOWN' THEN 1 ELSE 0 END) AS unknown,
+                SUM(CASE WHEN active_state = 'LEFT_LEAGUE' THEN 1 ELSE 0 END) AS left,
+                SUM(CASE WHEN portrait_state = 'CACHED' THEN 1 ELSE 0 END) AS cached,
+                SUM(CASE WHEN portrait_state = 'MISSING' THEN 1 ELSE 0 END) AS missing,
+                SUM(CASE WHEN portrait_state = 'NEEDS_REVIEW' THEN 1 ELSE 0 END) AS review,
+                SUM(CASE WHEN portrait_state = 'FAILED' THEN 1 ELSE 0 END) AS failed,
+                SUM(CASE WHEN portrait_state = 'REJECTED' THEN 1 ELSE 0 END) AS rejected
+            FROM player_master
+            """
+        ).fetchone()
+        if not row:
+            return {"total": 0, "active": 0, "unknown": 0, "left": 0, "cached": 0, "missing": 0, "review": 0, "failed": 0, "rejected": 0}
+        return {key: int(row[key] or 0) for key in row.keys()}
+
+    def players_needing_portrait(
+        self, *, limit: int | None = None, retry_failed: bool = False, player_ids: list[str] | None = None
+    ) -> list[dict]:
+        # NEEDS_REVIEW is included deliberately: resolver/scoring updates can
+        # automatically recover previously conservative matches without users
+        # having to delete the DB or reset portrait states manually.
+        states = ["MISSING", "NEEDS_REVIEW"]
+        if retry_failed:
+            states.append("FAILED")
+        placeholders = ",".join("?" for _ in states)
+        sql = f"""
+            SELECT * FROM player_master
+            WHERE active_state = 'ACTIVE' AND portrait_state IN ({placeholders})
+        """
+        params: list[object] = list(states)
+        if player_ids:
+            ids = [str(value) for value in player_ids if value is not None]
+            if ids:
+                sql += " AND player_id IN (" + ",".join("?" for _ in ids) + ")"
+                params.extend(ids)
+        sql += " ORDER BY market_value DESC, full_name COLLATE NOCASE"
+        if limit is not None:
+            sql += " LIMIT ?"
+            params.append(max(1, int(limit)))
+        rows = self.conn.execute(sql, params).fetchall()
+        return [dict(row) for row in rows]
+
+    def save_portrait_match(self, match) -> None:
+        now = datetime.now(UTC).replace(microsecond=0).isoformat()
+        self.conn.execute(
+            """
+            UPDATE player_master
+            SET fotmob_id = COALESCE(?, fotmob_id),
+                portrait_url = COALESCE(?, portrait_url),
+                portrait_path = COALESCE(?, portrait_path),
+                portrait_state = ?,
+                portrait_confidence = ?,
+                portrait_reason = ?,
+                portrait_candidate_name = COALESCE(?, portrait_candidate_name),
+                portrait_candidate_team = COALESCE(?, portrait_candidate_team),
+                portrait_candidate_position = COALESCE(?, portrait_candidate_position),
+                portrait_candidate_shirt_number = COALESCE(?, portrait_candidate_shirt_number),
+                portrait_checked_at = ?
+            WHERE player_id = ?
+            """,
+            (
+                getattr(match, "fotmob_id", None),
+                getattr(match, "portrait_url", None),
+                getattr(match, "portrait_path", None),
+                getattr(match, "state", "FAILED"),
+                int(getattr(match, "confidence", 0) or 0),
+                getattr(match, "reason", ""),
+                getattr(match, "candidate_name", None),
+                getattr(match, "candidate_team", None),
+                getattr(match, "candidate_position", None),
+                getattr(match, "candidate_shirt_number", None),
+                now,
+                str(getattr(match, "kickbase_player_id", "")),
+            ),
+        )
+        self.conn.commit()
+
+    def portrait_review_rows(self) -> list[dict]:
+        rows = self.conn.execute(
+            """
+            SELECT * FROM player_master
+            WHERE active_state = 'ACTIVE' AND portrait_state = 'NEEDS_REVIEW'
+            ORDER BY portrait_confidence DESC, market_value DESC, full_name COLLATE NOCASE
+            """
+        ).fetchall()
+        return [dict(row) for row in rows]
+
+    def reject_portrait_candidate(self, player_id: str) -> None:
+        now = datetime.now(UTC).replace(microsecond=0).isoformat()
+        self.conn.execute(
+            """
+            UPDATE player_master
+            SET portrait_state = 'REJECTED', portrait_checked_at = ?,
+                portrait_reason = CASE
+                    WHEN portrait_reason IS NULL OR portrait_reason = '' THEN 'Manuell abgelehnt'
+                    ELSE portrait_reason || ' · manuell abgelehnt'
+                END
+            WHERE player_id = ?
+            """,
+            (now, str(player_id)),
+        )
+        self.conn.commit()
+
+    def reset_rejected_portraits(self) -> int:
+        cur = self.conn.execute(
+            """
+            UPDATE player_master
+            SET portrait_state = 'MISSING', portrait_checked_at = NULL
+            WHERE active_state = 'ACTIVE' AND portrait_state = 'REJECTED'
+            """
+        )
+        self.conn.commit()
+        return int(cur.rowcount or 0)
+
+    def portrait_path(self, player_id: str) -> str | None:
+        """Resolve a portrait, preferring a writable local cache over bundled assets."""
+        pid = str(player_id)
+        row = self.conn.execute(
+            "SELECT portrait_path, portrait_state FROM player_master WHERE player_id = ?",
+            (pid,),
+        ).fetchone()
+        if row and row["portrait_state"] == "CACHED" and row["portrait_path"]:
+            path = Path(str(row["portrait_path"]))
+            if path.exists():
+                return str(path)
+
+        bundled = bundled_portrait_path(pid)
+        return str(bundled) if bundled is not None else None
+
+    # ------------------------------------------------------------------
     # Market value snapshots / analytics
     # ------------------------------------------------------------------
 
     def snapshot_market_value(self, player_id: str, value: int) -> None:
-        now = datetime.now(UTC).replace(microsecond=0).isoformat()
-        snapshot_date = now[:10]
+        now = datetime.now(UTC).replace(microsecond=0)
+        # The refresh schedule is defined in German local time.  Using UTC's
+        # calendar date here can shift observations between days around midnight.
+        snapshot_date = now.astimezone(ZoneInfo("Europe/Berlin")).date().isoformat()
+        recorded_at = now.isoformat()
         self.conn.execute(
             """
-            INSERT INTO market_values(player_id, value, snapshot_date, recorded_at)
-            VALUES(?, ?, ?, ?)
+            INSERT INTO market_values(player_id, value, snapshot_date, recorded_at, source)
+            VALUES(?, ?, ?, ?, 'live')
             ON CONFLICT(player_id, snapshot_date) DO UPDATE SET
                 value = excluded.value,
-                recorded_at = excluded.recorded_at
+                recorded_at = excluded.recorded_at,
+                source = excluded.source
             """,
-            (player_id, int(value), snapshot_date, now),
+            (player_id, int(value), snapshot_date, recorded_at),
         )
         self.conn.commit()
 
 
-    def upsert_market_value_history(self, player_id: str, rows: list[dict]) -> None:
-        """Persist remote historical MV points without overwriting newer same-day observations."""
+    def upsert_market_value_history(self, player_id: str, rows: list[dict]) -> int:
+        """Persist exact remote MV history and backfill missing calendar days.
+
+        Historical rows are treated as authoritative for past days, but never
+        replace a newer observation from the same day. This is important when a
+        normal live sync has already stored today's current market value.
+
+        Returns the number of inserted/updated historical day rows.
+        """
         payload = []
+        now = datetime.now(UTC).replace(microsecond=0)
+
         for row in rows or []:
             try:
                 value = int(row.get("value") or 0)
                 snapshot_date = str(row.get("snapshot_date") or "")[:10]
+                parsed_day = date.fromisoformat(snapshot_date)
             except (TypeError, ValueError):
                 continue
-            if value <= 0 or len(snapshot_date) != 10:
+
+            # The history endpoint can expose a row for the current calendar
+            # day before the 22:00 refresh. That row still represents the last
+            # completed refresh and would duplicate yesterday's value. Keep
+            # today's value exclusively from a real live observation.
+            if value <= 0 or parsed_day >= now.date():
                 continue
-            recorded_at = str(row.get("recorded_at") or snapshot_date)
+
+            raw_recorded_at = str(row.get("recorded_at") or "").strip()
+            if raw_recorded_at:
+                recorded_at = raw_recorded_at
+            else:
+                # Noon UTC is intentional: it clearly marks this as a historical
+                # day value instead of pretending it was observed at refresh time.
+                recorded_at = f"{snapshot_date}T12:00:00+00:00"
+
             payload.append((str(player_id), value, snapshot_date, recorded_at))
+
         if not payload:
-            return
-        self.conn.executemany(
-            """
-            INSERT INTO market_values(player_id, value, snapshot_date, recorded_at)
-            VALUES(?, ?, ?, ?)
-            ON CONFLICT(player_id, snapshot_date) DO UPDATE SET
-                value = excluded.value,
-                recorded_at = excluded.recorded_at
-            """,
-            payload,
-        )
-        self.conn.commit()
+            return 0
+
+        with self.conn:
+            self.conn.executemany(
+                """
+                INSERT INTO market_values(player_id, value, snapshot_date, recorded_at, source)
+                VALUES(?, ?, ?, ?, 'history')
+                ON CONFLICT(player_id, snapshot_date) DO UPDATE SET
+                    value = excluded.value,
+                    recorded_at = excluded.recorded_at,
+                    source = excluded.source
+                WHERE excluded.recorded_at >= market_values.recorded_at
+                   OR market_values.recorded_at IS NULL
+                   OR market_values.recorded_at = ''
+                """,
+                payload,
+            )
+
+        return len(payload)
+
+    def missing_market_value_days(
+        self,
+        player_id: str,
+        *,
+        start_date: str | date | None = None,
+        end_date: str | date | None = None,
+    ) -> list[str]:
+        """Return missing calendar days for one player's stored MV timeline.
+
+        By default the range starts at the first stored market-value day and ends
+        yesterday. Today is excluded because its value can still change during
+        the current Kickbase refresh cycle.
+        """
+        player_id = str(player_id)
+
+        if start_date is None:
+            row = self.conn.execute(
+                """
+                SELECT MIN(snapshot_date) AS first_day
+                FROM market_values
+                WHERE player_id = ?
+                """,
+                (player_id,),
+            ).fetchone()
+            if not row or not row["first_day"]:
+                return []
+            start = date.fromisoformat(str(row["first_day"])[:10])
+        elif isinstance(start_date, date):
+            start = start_date
+        else:
+            start = date.fromisoformat(str(start_date)[:10])
+
+        if end_date is None:
+            end = date.today() - timedelta(days=1)
+        elif isinstance(end_date, date):
+            end = end_date
+        else:
+            end = date.fromisoformat(str(end_date)[:10])
+
+        if end < start:
+            return []
+
+        existing = {
+            str(row["snapshot_date"])[:10]
+            for row in self.conn.execute(
+                """
+                SELECT snapshot_date
+                FROM market_values
+                WHERE player_id = ?
+                  AND snapshot_date BETWEEN ? AND ?
+                """,
+                (player_id, start.isoformat(), end.isoformat()),
+            ).fetchall()
+            if row["snapshot_date"]
+        }
+
+        missing = []
+        cursor = start
+        while cursor <= end:
+            day = cursor.isoformat()
+            if day not in existing:
+                missing.append(day)
+            cursor += timedelta(days=1)
+        return missing
+
+    def market_value_backfill_status(
+        self,
+        *,
+        start_date: str | date | None = None,
+        end_date: str | date | None = None,
+    ) -> dict:
+        """Summarize missing MV days across every player known to the database."""
+        player_ids = [
+            str(row["player_id"])
+            for row in self.conn.execute(
+                """
+                SELECT DISTINCT player_id
+                FROM market_values
+                ORDER BY player_id
+                """
+            ).fetchall()
+        ]
+
+        missing_by_player: dict[str, list[str]] = {}
+        for player_id in player_ids:
+            missing = self.missing_market_value_days(
+                player_id,
+                start_date=start_date,
+                end_date=end_date,
+            )
+            if missing:
+                missing_by_player[player_id] = missing
+
+        all_missing_days = sorted({
+            day
+            for days in missing_by_player.values()
+            for day in days
+        })
+
+        return {
+            "players_checked": len(player_ids),
+            "players_with_gaps": len(missing_by_player),
+            "missing_days": all_missing_days,
+            "missing_by_player": missing_by_player,
+        }
+
+    def backfill_market_value_histories(
+        self,
+        histories: dict[str, list[dict]],
+    ) -> dict:
+        """Backfill exact historical market values for multiple players at once.
+
+        ``histories`` maps player_id -> normalized history rows. No interpolation
+        or estimation is performed. The method simply persists real historical
+        values supplied by the Kickbase history endpoint/cache.
+        """
+        written = 0
+        players = 0
+
+        for player_id, rows in (histories or {}).items():
+            if not rows:
+                continue
+            players += 1
+            written += self.upsert_market_value_history(str(player_id), rows)
+
+        status = self.market_value_backfill_status()
+        return {
+            "players_with_history": players,
+            "history_rows_processed": written,
+            **status,
+        }
 
     def all_market_value_rows(self) -> list[dict]:
         """Return all persisted daily market-value observations for model calibration."""
@@ -702,8 +1623,9 @@ class Storage:
         A sync either becomes fully visible to the UI or not at all. This avoids
         partially updated squads when a database write fails halfway through.
         """
-        now = datetime.now(UTC).replace(microsecond=0).isoformat()
-        snapshot_date = now[:10]
+        now_dt = datetime.now(UTC).replace(microsecond=0)
+        now = now_dt.isoformat()
+        snapshot_date = now_dt.astimezone(ZoneInfo("Europe/Berlin")).date().isoformat()
 
         with self.conn:
             self.conn.execute("UPDATE players SET player_status = 'NICHT_IM_KADER'")
@@ -740,10 +1662,10 @@ class Storage:
                 )
                 self.conn.execute(
                     """
-                    INSERT INTO market_values(player_id, value, snapshot_date, recorded_at)
-                    VALUES(?, ?, ?, ?)
+                    INSERT INTO market_values(player_id, value, snapshot_date, recorded_at, source)
+                    VALUES(?, ?, ?, ?, 'live')
                     ON CONFLICT(player_id, snapshot_date) DO UPDATE SET
-                        value = excluded.value, recorded_at = excluded.recorded_at
+                        value = excluded.value, recorded_at = excluded.recorded_at, source = 'live'
                     """,
                     (player["player_id"], int(player["market_value"]), snapshot_date, now),
                 )
@@ -821,6 +1743,13 @@ class Storage:
                 """,
                 [(key, str(value)) for key, value in settings.items()],
             )
+
+        # Optional automatic history backfill. Sync services can attach a
+        # ``market_value_histories`` mapping (player_id -> normalized rows) to
+        # the result object. Older SyncResult objects remain fully compatible.
+        histories = getattr(result, "market_value_histories", None)
+        if histories:
+            self.backfill_market_value_histories(histories)
 
     def team_value_history(self, league_id: str | None, days: int = 90) -> list[dict]:
         if not league_id:
@@ -1043,8 +1972,12 @@ class Storage:
         A full sync marker is only written when every requested manager squad
         was fetched successfully. Partial data remains usable for known owners,
         but the UI will not label unknown players as free until coverage is full.
+        The same sync also writes fresh live market-value observations for these
+        players so the 22U model can learn and evaluate beyond the transfer market.
         """
-        now = getattr(result, "fetched_at", None) or datetime.now(UTC).replace(microsecond=0).isoformat()
+        now_dt = datetime.now(UTC).replace(microsecond=0)
+        now = getattr(result, "fetched_at", None) or now_dt.isoformat()
+        snapshot_date = now_dt.astimezone(ZoneInfo("Europe/Berlin")).date().isoformat()
         with self.conn:
             self.conn.execute(
                 "DELETE FROM league_manager_players WHERE league_id = ?",
@@ -1067,6 +2000,19 @@ class Storage:
                             player.get("team_image"), squad.fetched_at,
                         )
                         for player in squad.players
+                    ],
+                )
+                self.conn.executemany(
+                    """
+                    INSERT INTO market_values(player_id, value, snapshot_date, recorded_at, source)
+                    VALUES(?, ?, ?, ?, 'live')
+                    ON CONFLICT(player_id, snapshot_date) DO UPDATE SET
+                        value = excluded.value, recorded_at = excluded.recorded_at, source = 'live'
+                    """,
+                    [
+                        (str(player["player_id"]), int(player.get("market_value") or 0), snapshot_date, now)
+                        for player in squad.players
+                        if int(player.get("market_value") or 0) > 0
                     ],
                 )
 
@@ -1100,6 +2046,29 @@ class Storage:
             (league_id,),
         ).fetchone()
         return int(covered_row["count"] or 0), int(total_row["count"] or 0)
+
+    def league_prediction_pool(self, league_id: str) -> list[dict]:
+        """Return cached players owned by other managers for 22U predictions."""
+        rows = self.conn.execute(
+            """
+            SELECT lmp.*, lm.is_user
+            FROM league_manager_players lmp
+            LEFT JOIN league_managers lm
+              ON lm.league_id = lmp.league_id AND lm.manager_id = lmp.manager_id
+            WHERE lmp.league_id = ?
+            ORDER BY lmp.updated_at DESC, lmp.market_value DESC
+            """,
+            (league_id,),
+        ).fetchall()
+        result = []
+        seen: set[str] = set()
+        for row in rows:
+            pid = str(row["player_id"] or "")
+            if not pid or pid in seen or int(row["is_user"] or 0) == 1:
+                continue
+            seen.add(pid)
+            result.append(dict(row))
+        return result
 
     # ------------------------------------------------------------------
     # League manager transfer history

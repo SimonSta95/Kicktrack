@@ -41,7 +41,7 @@ def test_negative_budget_is_highest_priority_warning():
 def test_stale_manager_listings_are_capped_as_manager_deals():
     rows = [market_row(player_id=str(i), name=f"Player {i}", full_name=f"Player {i}") for i in range(8)]
     recs = build_coach_recommendations(rows, [], managers=[], available_budget=10_000_000)
-    assert sum(1 for rec in recs if rec["kind"] == "manager_buy") == 2
+    assert sum(1 for rec in recs if rec["kind"] == "manager_buy") == 4
     assert not any(rec["label"] == "LOWBALL-CHANCE" for rec in recs)
 
 
@@ -51,7 +51,7 @@ def test_negative_budget_suppresses_manager_buy_suggestions():
     assert not any(rec["kind"] == "manager_buy" for rec in recs)
 
 
-def test_manager_deals_are_capped_to_two():
+def test_manager_deals_are_capped_to_four():
     rows = [
         market_row(
             player_id=str(i),
@@ -69,7 +69,7 @@ def test_manager_deals_are_capped_to_two():
         for i in range(6)
     ]
     recs = build_coach_recommendations(rows, [], managers=[], available_budget=20_000_000)
-    assert sum(1 for rec in recs if rec["kind"] == "manager_buy") == 2
+    assert sum(1 for rec in recs if rec["kind"] == "manager_buy") == 4
 
 
 def test_negative_budget_suppresses_all_buy_suggestions():
