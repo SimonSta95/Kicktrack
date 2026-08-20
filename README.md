@@ -21,7 +21,7 @@ KickTrack automatisiert keine Transfers. Schreibende Aktionen wie ein Gebot werd
 - Fachliche Berechnungen, Datenbank-Schema, bestehende API-Semantik und Nutzerflows wurden beim Refactor bewusst nicht neu erfunden; Ziel dieser Version ist Struktur, Wartbarkeit und geringeres Änderungsrisiko.
 - Vollständige Testsuite bleibt grün. Versionsanzeigen und README auf V6.0.0 angehoben.
 
-### V5.6.0 – Senior-Dev Cleanup & UI-Refactor
+### V5.6.0 – Cleanup & UI-Refactor
 
 - Die zuletzt gewachsene Performance-Balkenansicht wurde aus der über 10.000 Zeilen großen `app/ui.py` in das eigenständige Modul `app/performance_chart.py` ausgelagert. Das Widget ist jetzt UI-agnostischer und erhält Club-Icons sowie Datumsformatierung über Callbacks statt über harte Abhängigkeiten.
 - Die Versionsanzeige ist in `app/version.py` zentralisiert. `main.py` und das Hauptfenster verwenden jetzt dieselbe `APP_DISPLAY_NAME`-Konstante; ein Regressionstest hält App- und `pyproject.toml`-Version synchron.
