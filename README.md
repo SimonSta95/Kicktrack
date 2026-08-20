@@ -1,4 +1,4 @@
-# KickTrack V5.6.0
+# KickTrack V6.0.0
 
 
 **Private Kickbase Analytics · Preseason + Season Command Center für Windows**
@@ -10,6 +10,16 @@ KickTrack automatisiert keine Transfers. Schreibende Aktionen wie ein Gebot werd
 ---
 
 ## Aktueller Stand
+
+### V6.0.0 – Full Architecture Refactor
+
+- Die frühere UI-Monolith-Datei `app/ui.py` wurde von über 10.000 Zeilen auf rund 1.500 Zeilen reduziert und dient jetzt primär als **Composition Root** für das Hauptfenster. Markt, Intelligence, Coach, Sync, Dashboard/Kader, Liga und Transfer-/Analysefunktionen liegen in klar getrennten Feature-Mixins.
+- Wiederverwendbare Qt-Bausteine und Formatierungs-/Statushelfer liegen in `app/ui_components.py`. Dialoge wurden nach Verantwortung in `player_dialogs.py`, `manager_dialogs.py` und `action_dialogs.py` getrennt; `app/dialogs.py` bleibt als kleine stabile Import-Fassade bestehen.
+- Der zuvor über 1.300 Zeilen große `KickbaseClient` ist in Transport/Basis sowie die API-Domänen **Market/Transfers**, **Intelligence** und **League/Manager** zerlegt. Die öffentliche `KickbaseClient`-Schnittstelle bleibt dadurch kompatibel.
+- Der verifizierte Verkaufsflow bleibt unverändert sicher: Listen, vom Markt nehmen und **an Kickbase verkaufen** sind weiterhin getrennte Aktionen; unbestätigte Manager-Offer-Writes bleiben gesperrt.
+- Wildcard-Imports wurden in den refaktorierten UI-Modulen entfernt. Neue Architektur-Regressionstests verhindern, dass `ui.py`, `dialogs.py` oder `kickbase.py` wieder zu Monolithen zurückwachsen.
+- Fachliche Berechnungen, Datenbank-Schema, bestehende API-Semantik und Nutzerflows wurden beim Refactor bewusst nicht neu erfunden; Ziel dieser Version ist Struktur, Wartbarkeit und geringeres Änderungsrisiko.
+- Vollständige Testsuite bleibt grün. Versionsanzeigen und README auf V6.0.0 angehoben.
 
 ### V5.6.0 – Senior-Dev Cleanup & UI-Refactor
 
