@@ -615,7 +615,7 @@ class SellPlayerDialog(QDialog):
         self.player = dict(player or {})
         self.market_value = int(self.player.get("market_value") or 0)
         self.amount = 0
-        self.setWindowTitle("Spieler verkaufen")
+        self.setWindowTitle("Spieler anbieten")
         self.setMinimumWidth(440)
 
         layout = QVBoxLayout(self)
@@ -648,7 +648,7 @@ class SellPlayerDialog(QDialog):
         actions.addStretch()
         cancel = QPushButton("ABBRECHEN")
         cancel.clicked.connect(self.reject)
-        self.submit = QPushButton("VERKAUF PRÜFEN")
+        self.submit = QPushButton("ANBIETEN")
         self.submit.setObjectName("Primary")
         self.submit.clicked.connect(self._accept_if_valid)
         actions.addWidget(cancel)

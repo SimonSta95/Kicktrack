@@ -85,6 +85,7 @@ from .ui_v4_components import (
 )
 from .mv_prediction import build_predictions
 from .performance_chart import PerformanceMatchBarsWidget
+from .loading_skeleton import MarketDetailSkeletonOverlay, MarketTableSkeletonOverlay
 from .market_analysis import enrich_market_entries, financing_scenarios
 from .bid_analysis import rate_bid
 from .bidding import calculate_bid_capacity
@@ -238,15 +239,18 @@ class MarketMixin:
         # Master/detail layout: the table is for scanning; the right panel
         # explains the selected player without hiding decision-critical data
         # in tooltips or modal dialogs.
+        # Keep the scan table deliberately compact. The recommendation already
+        # lives in the persistent detail pane on the right; duplicating it as a
+        # twelfth column made the master table unreadable at normal desktop
+        # widths and caused clipped headers after the V6 splitter refactor.
         self.market_table = self._make_table(
-            ["SPIELER", "VEREIN", "POS", "ANBIETER", "MARKTWERT", "24H", "22U", "PREIS", "DEIN GEBOT", "VALUE", "ABLAUF", "EMPFEHLUNG"],
-            [210, 108, 50, 112, 96, 68, 72, 92, 102, 66, 86, 126],
+            ["SPIELER", "VEREIN", "POS", "ANBIETER", "MW", "24H", "22U", "PREIS", "DEIN GEBOT", "VALUE", "ABLAUF"],
+            [220, 112, 54, 116, 100, 72, 76, 96, 108, 72, 92],
         )
         self.market_table.setItemDelegateForColumn(1, ClubItemDelegate(self.market_table))
-        self.market_table.setItemDelegateForColumn(11, RecommendationChipDelegate(self.market_table))
         self.market_table.set_responsive_widths(
-            [210, 108, 50, 112, 96, 68, 72, 92, 102, 66, 86, 126],
-            [180, 90, 46, 92, 84, 58, 60, 82, 88, 58, 74, 106],
+            [220, 112, 54, 116, 100, 72, 76, 96, 108, 72, 92],
+            [188, 94, 50, 96, 92, 62, 64, 86, 94, 62, 82],
         )
         self.market_table.verticalHeader().setDefaultSectionSize(50)
         self.market_countdown_timer = QTimer(self)
@@ -388,12 +392,17 @@ class MarketMixin:
         splitter.setObjectName("MarketSplitter")
         splitter.addWidget(self.market_table)
         splitter.addWidget(self.market_detail_panel)
+        self.market_table.setMinimumWidth(760)
+        self.market_detail_panel.setMinimumWidth(300)
+        self.market_detail_panel.setMaximumWidth(420)
+        splitter.setChildrenCollapsible(False)
         splitter.setStretchFactor(0, 1)
         splitter.setStretchFactor(1, 0)
-        splitter.setSizes([1040, 360])
+        splitter.setSizes([1120, 340])
         layout.addWidget(splitter, 1)
         self._add_scroll_page(page)
 
+    @staticmethod
     def _scanner_delta(history: list[dict], days: int) -> int | None:
         if not history:
             return None
@@ -542,50 +551,111 @@ class MarketMixin:
     def _load_market_overview(self, *_args) -> None:
         league_id = self.league_combo.currentData()
         league_id = str(league_id) if league_id else self.storage.get_setting("league_id")
-        if not league_id or self._market_worker is not None:
+        if not league_id or any((self._market_worker, self._market_enrichment_worker, self._market_status_worker)):
             return
         manager_id = self.storage.get_league_setting(league_id, "manager_id") or self.storage.get_setting("manager_id")
         owned_player_ids = {str(p.get("player_id")) for p in self.storage.current_players() if p.get("player_id") is not None}
+
+        # Every refresh gets a generation token. Slow enrichment/status workers from
+        # an older refresh are ignored instead of repainting stale data later.
+        self._market_load_generation = int(getattr(self, "_market_load_generation", 0)) + 1
+        generation = self._market_load_generation
+
+        self._market_pending_base_rows = []
+        self._market_pending_enrichment = None
+        self._market_pending_statuses = None
+        self._market_enrichment_done = False
+        self._market_status_done = False
+
         self.market_refresh_btn.setEnabled(False)
         self.market_refresh_btn.setText("◌  MARKT LÄDT …")
-        self.market_status.setText("Transfermarkt wird geladen …")
-        def load_market_with_statuses():
-            data = self.client.market_overview(league_id, manager_id, owned_player_ids)
+        self.market_status.setText("Transfermarkt wird vollständig geladen …")
+        self._show_market_skeleton()
 
-            # The normal transfer-market payload does not reliably include `st`
-            # / `stl` for every player. Reuse the same canonical teamprofile map
-            # as the MW scanner so Market, Kader and Player Detail all speak the
-            # same status language. Six-hour caching keeps this to ~18 requests
-            # only when the cache is cold, not on every market refresh.
+        def load_market_fast():
+            # Fast path: only the two requests required for the visible market.
+            # Canonical statuses and all analytical enrichment are deliberately
+            # excluded so the table can appear as soon as the market payload is back.
+            return self.client.market_overview(league_id, manager_id, owned_player_ids)
+
+        worker = FunctionWorker(load_market_fast)
+        self._market_worker = worker
+        worker.signals.succeeded.connect(
+            lambda data, lid=league_id, gen=generation: self._market_overview_loaded(lid, data, gen)
+        )
+        worker.signals.failed.connect(self._market_overview_failed)
+        worker.signals.finished.connect(self._market_overview_finished)
+        QThreadPool.globalInstance().start(worker)
+
+    def _show_market_skeleton(self, row_count: int = 9) -> None:
+        """Show a modern animated shimmer while all market workers finish.
+
+        The skeleton is a paint-only overlay. It never performs API work and does
+        not populate fake table items, so animation remains independent from the
+        asynchronous market/status/analysis pipeline.
+        """
+        if not hasattr(self, "market_table"):
+            return
+
+        table = self.market_table
+        table.setSortingEnabled(False)
+        table.clearContents()
+        table.setRowCount(0)
+        table.setSortingEnabled(True)
+
+        skeleton = getattr(self, "_market_table_skeleton", None)
+        if skeleton is None:
+            skeleton = MarketTableSkeletonOverlay(table, row_count=row_count)
+            self._market_table_skeleton = skeleton
+        else:
+            skeleton.row_count = row_count
+        skeleton.start()
+
+        if hasattr(self, "market_detail_panel"):
+            detail_skeleton = getattr(self, "_market_detail_skeleton", None)
+            if detail_skeleton is None:
+                detail_skeleton = MarketDetailSkeletonOverlay(self.market_detail_panel)
+                self._market_detail_skeleton = detail_skeleton
+            detail_skeleton.start()
+
+    def _start_market_status_enrichment(self, league_id: str, generation: int, market_entries: list[dict]) -> None:
+        if self._market_status_worker is not None:
+            return
+
+        def load_statuses():
             status_map = self.storage.cache_get("competition:1:player_statuses", 6 * 3600)
             if not isinstance(status_map, dict):
                 status_map = self.client.competition_player_statuses()
                 if status_map:
                     self.storage.cache_set("competition:1:player_statuses", status_map)
+            return status_map if isinstance(status_map, dict) else {}
 
-            if isinstance(status_map, dict):
-                for collection in ("market_entries", "own_listings"):
-                    for row in data.get(collection, []) if isinstance(data, dict) else []:
-                        if not isinstance(row, dict):
-                            continue
-                        pid = str(row.get("player_id") or "")
-                        canonical = status_map.get(pid)
-                        if not isinstance(canonical, dict):
-                            continue
-                        # Prefer canonical teamprofile status over a missing market
-                        # value. If the market explicitly supplies st/stl they should
-                        # agree, but teamprofile is our single source of truth.
-                        row["status"] = canonical.get("status")
-                        row["status_list"] = canonical.get("status_list") or []
-            return data
-
-        worker = FunctionWorker(load_market_with_statuses)
-        self._market_worker = worker
-        worker.signals.succeeded.connect(lambda data, lid=league_id: self._market_overview_loaded(lid, data))
-        worker.signals.failed.connect(self._market_overview_failed)
-        worker.signals.finished.connect(self._market_overview_finished)
+        worker = FunctionWorker(load_statuses)
+        self._market_status_worker = worker
+        worker.signals.succeeded.connect(
+            lambda status_map, lid=league_id, gen=generation: self._market_statuses_loaded(lid, gen, status_map)
+        )
+        worker.signals.failed.connect(self._market_statuses_failed)
+        worker.signals.finished.connect(self._market_statuses_finished)
         QThreadPool.globalInstance().start(worker)
 
+    def _market_statuses_loaded(self, league_id: str, generation: int, status_map: dict) -> None:
+        if generation != getattr(self, "_market_load_generation", 0) or not isinstance(status_map, dict):
+            return
+        self._market_pending_statuses = dict(status_map)
+
+    def _market_statuses_failed(self, message: str) -> None:
+        self._market_pending_statuses = {}
+        self.statusBar().showMessage(
+            "Spielerstatus konnten nicht vollständig geladen werden: " + str(message).splitlines()[0], 7000
+        )
+
+    def _market_statuses_finished(self) -> None:
+        self._market_status_worker = None
+        self._market_status_done = True
+        self._try_finalize_market_loading()
+
+    @staticmethod
     def _mv_prediction_target_date() -> date:
         """Refresh day targeted by a prediction made right now (Europe/Berlin)."""
         now = datetime.now(ZoneInfo("Europe/Berlin"))
@@ -594,6 +664,7 @@ class MarketMixin:
         # calculated forecast necessarily targets tomorrow's refresh.
         return today if now.hour < 22 else today + timedelta(days=1)
 
+    @staticmethod
     def _mv_prediction_evaluation_through() -> date:
         """Latest day that can safely be treated as a completed 22:00 refresh."""
         now = datetime.now(ZoneInfo("Europe/Berlin"))
@@ -696,147 +767,238 @@ class MarketMixin:
         result = optimize_starting_squad(squad, rows, budget)
         PreseasonOptimizerDialog(self, result, budget).exec()
 
-    def _market_overview_loaded(self, league_id: str, data: dict) -> None:
+    def _market_overview_loaded(self, league_id: str, data: dict, generation: int | None = None) -> None:
+        generation = int(generation or getattr(self, "_market_load_generation", 0))
+        if generation != getattr(self, "_market_load_generation", 0):
+            return
+
         available = int(data.get("rest_without_sales") or 0)
         committed = int(data.get("committed") or 0)
         cash_balance = int(data.get("balance") if data.get("balance") is not None else (available + committed))
         self._cash_balance = cash_balance
         self._active_bid_committed = committed
         market_entries = [dict(row) for row in (data.get("market_entries") or [])]
-        # Persist one daily snapshot for every player we actually see on the market.
-        # This lets KickTrack build its own 3/7/14-day momentum without extra API calls.
         for row in market_entries:
-            player_id = row.get("player_id")
-            market_value = row.get("market_value")
-            if player_id and market_value:
-                try:
-                    self.storage.snapshot_market_value(str(player_id), int(market_value))
-                    api_d1 = row.get("d1") if row.get("d1") is not None else row.get("daily_change")
-                    analytics = self.storage.analytics(str(player_id))
-                    row.update(analytics)
-                    if row.get("d1") is None and api_d1 is not None:
-                        row["d1"] = int(api_d1)
-                        row["daily_change"] = int(api_d1)
-                except Exception:
-                    pass
-        # Score forecasts only against refresh days that are definitely complete.
-        try:
-            self.storage.evaluate_mv_predictions(
-                str(league_id), through_date=self._mv_prediction_evaluation_through()
-            )
-        except Exception:
-            pass
+            price = int(row.get("price") or 0)
+            market_value = int(row.get("market_value") or 0)
+            row.setdefault("price_delta", price - market_value if price and market_value else 0)
+            row.setdefault("affordable", bool(price and price <= available))
 
-        # Predict the next 22:00 market-value refresh from the daily history.
-        # The predictor is intentionally conservative: latest 24h movement is
-        # calibrated against comparable historical observations and accompanied
-        # by an empirical uncertainty range.
-        try:
-            history_rows = self.storage.all_market_value_rows()
-            current_values: dict[str, int] = {}
-            current_deltas: dict[str, int] = {}
-            prediction_sources: dict[str, str] = {}
+        # Keep the skeleton visible until both analytical enrichment and canonical
+        # status enrichment have finished. The network result is staged here, but
+        # never painted as a half-complete table.
+        self._market_pending_base_rows = market_entries
+        self._market_budget = available
+        self.market_count_card.value_label.setText("…")
+        self.market_under_card.value_label.setText("…")
+        self.market_interest_card.value_label.setText("…")
+        self.market_interest_card.hint_label.setText("Marktdaten werden vollständig vorbereitet …")
+        self.market_budget_card.value_label.setText(euro(available))
+        capacity = squad_capacity(self._player_metrics())
+        self.market_budget_card.hint_label.setText(f"nach Geboten · Kader {capacity.current}/{capacity.maximum}")
+        self.market_status.setText(f"{len(market_entries)} Spieler gefunden · Analyse & Status werden geladen …")
 
-            for row in market_entries:
-                pid = str(row.get("player_id") or "")
-                mv = row.get("market_value")
-                if not pid or mv is None:
-                    continue
-                current_values[pid] = int(mv or 0)
-                prediction_sources[pid] = "MARKET"
-                if row.get("d1") is not None:
-                    current_deltas[pid] = int(row.get("d1") or 0)
+        # Status and analytical enrichment are independent and run concurrently.
+        self._start_market_status_enrichment(league_id, generation, market_entries)
+        self._start_market_enrichment(league_id, generation, data, market_entries)
 
-            for row in self.storage.current_players():
-                pid = str(row.get("player_id") or "")
-                mv = row.get("market_value")
-                if not pid or mv is None or pid in current_values:
-                    continue
-                current_values[pid] = int(mv or 0)
-                prediction_sources[pid] = "OWN_SQUAD"
-                if row.get("daily_change") is not None:
-                    current_deltas[pid] = int(row.get("daily_change") or 0)
-                else:
+    def _start_market_enrichment(self, league_id: str, generation: int, data: dict, market_entries: list[dict]) -> None:
+        if self._market_enrichment_worker is not None:
+            return
+        available = int(data.get("rest_without_sales") or 0)
+        committed = int(data.get("committed") or 0)
+        cash_balance = int(data.get("balance") if data.get("balance") is not None else (available + committed))
+        points_are_current = self._season_stats_current(str(league_id))
+        season_started = self._season_mode_active()
+
+        def enrich_market_background():
+            rows_in = [dict(row) for row in market_entries]
+
+            # Persist/merge market-value analytics away from the GUI thread.
+            for row in rows_in:
+                player_id = row.get("player_id")
+                market_value = row.get("market_value")
+                if player_id and market_value:
+                    try:
+                        self.storage.snapshot_market_value(str(player_id), int(market_value))
+                        api_d1 = row.get("d1") if row.get("d1") is not None else row.get("daily_change")
+                        analytics = self.storage.analytics(str(player_id))
+                        row.update(analytics)
+                        if row.get("d1") is None and api_d1 is not None:
+                            row["d1"] = int(api_d1)
+                            row["daily_change"] = int(api_d1)
+                    except Exception:
+                        pass
+
+            try:
+                self.storage.evaluate_mv_predictions(
+                    str(league_id), through_date=self._mv_prediction_evaluation_through()
+                )
+            except Exception:
+                pass
+
+            try:
+                history_rows = self.storage.all_market_value_rows()
+                current_values: dict[str, int] = {}
+                current_deltas: dict[str, int] = {}
+                prediction_sources: dict[str, str] = {}
+
+                for row in rows_in:
+                    pid = str(row.get("player_id") or "")
+                    mv = row.get("market_value")
+                    if not pid or mv is None:
+                        continue
+                    current_values[pid] = int(mv or 0)
+                    prediction_sources[pid] = "MARKET"
+                    if row.get("d1") is not None:
+                        current_deltas[pid] = int(row.get("d1") or 0)
+
+                for row in self.storage.current_players():
+                    pid = str(row.get("player_id") or "")
+                    mv = row.get("market_value")
+                    if not pid or mv is None or pid in current_values:
+                        continue
+                    current_values[pid] = int(mv or 0)
+                    prediction_sources[pid] = "OWN_SQUAD"
+                    if row.get("daily_change") is not None:
+                        current_deltas[pid] = int(row.get("daily_change") or 0)
+                    else:
+                        analytics = self.storage.analytics(pid)
+                        if analytics.get("d1") is not None:
+                            current_deltas[pid] = int(analytics.get("d1") or 0)
+
+                for row in self.storage.league_prediction_pool(str(league_id)):
+                    pid = str(row.get("player_id") or "")
+                    mv = row.get("market_value")
+                    if not pid or mv is None or pid in current_values:
+                        continue
+                    current_values[pid] = int(mv or 0)
+                    prediction_sources[pid] = "MANAGER_SQUAD"
                     analytics = self.storage.analytics(pid)
                     if analytics.get("d1") is not None:
                         current_deltas[pid] = int(analytics.get("d1") or 0)
 
-            for row in self.storage.league_prediction_pool(str(league_id)):
-                pid = str(row.get("player_id") or "")
-                mv = row.get("market_value")
-                if not pid or mv is None or pid in current_values:
-                    continue
-                current_values[pid] = int(mv or 0)
-                prediction_sources[pid] = "MANAGER_SQUAD"
-                analytics = self.storage.analytics(pid)
-                if analytics.get("d1") is not None:
-                    current_deltas[pid] = int(analytics.get("d1") or 0)
+                prediction_target = self._mv_prediction_target_date()
+                predictions = build_predictions(
+                    history_rows,
+                    current_values=current_values,
+                    current_deltas=current_deltas,
+                    target_date=prediction_target,
+                )
+                for row in rows_in:
+                    pred = predictions.get(str(row.get("player_id")))
+                    if pred:
+                        row["next_refresh_prediction"] = pred
+                        row["next_refresh_delta"] = pred.get("delta")
+                self.storage.record_mv_predictions(
+                    str(league_id), predictions,
+                    current_values=current_values,
+                    current_deltas=current_deltas,
+                    target_date=prediction_target,
+                    sources=prediction_sources,
+                )
+            except Exception:
+                pass
 
-            prediction_target = self._mv_prediction_target_date()
-            predictions = build_predictions(
-                history_rows,
-                current_values=current_values,
-                current_deltas=current_deltas,
-                target_date=prediction_target,
+            league_transfers = self.storage.league_all_manager_transfer_rows(
+                str(league_id), since=current_season_start().isoformat()
             )
-            for row in market_entries:
-                pred = predictions.get(str(row.get("player_id")))
-                if pred:
-                    row["next_refresh_prediction"] = pred
-                    row["next_refresh_delta"] = pred.get("delta")
-            self.storage.record_mv_predictions(
-                str(league_id), predictions,
-                current_values=current_values, current_deltas=current_deltas,
-                target_date=prediction_target,
-                sources=prediction_sources,
+            rows = enrich_market_entries(
+                rows_in,
+                available,
+                self.storage.current_players(),
+                points_are_current=points_are_current,
+                league_transfers=league_transfers,
             )
-            self._refresh_mv_model_quality(str(league_id))
-        except Exception:
-            predictions = {}
 
-        league_transfers = self.storage.league_all_manager_transfer_rows(
-            str(league_id), since=current_season_start().isoformat()
+            try:
+                squad_rows = enrich_squad_entries(
+                    self._player_metrics(),
+                    points_are_current=points_are_current,
+                    market_rows=rows,
+                    available_budget=available,
+                )
+                rows, _portfolio_squad, portfolio_summary = analyze_portfolio(
+                    rows,
+                    squad_rows,
+                    available_budget=cash_balance,
+                    season_started=season_started,
+                    committed_budget=committed,
+                )
+            except Exception:
+                portfolio_summary = {}
+
+            rows = add_value_scores(rows)
+            try:
+                self.storage.record_market_decisions(str(league_id), rows)
+                backtest = self.storage.decision_backtest_summary(str(league_id))
+            except Exception:
+                backtest = {"evaluated": 0, "hit_rate": None}
+
+            return {
+                "rows": rows,
+                "portfolio_summary": portfolio_summary,
+                "backtest": backtest,
+                "points_are_current": points_are_current,
+            }
+
+        worker = FunctionWorker(enrich_market_background)
+        self._market_enrichment_worker = worker
+        worker.signals.succeeded.connect(
+            lambda result, lid=league_id, gen=generation: self._market_enrichment_loaded(lid, gen, result)
         )
-        rows = enrich_market_entries(
-            market_entries,
-            available,
-            self.storage.current_players(),
-            points_are_current=self._season_stats_current(str(league_id)),
-            league_transfers=league_transfers,
-        )
-        # Apply the same portfolio/deadline classification here that the Coach
-        # uses, so Market, Coach and Budget speak one decision language.
-        try:
-            squad_rows = enrich_squad_entries(
-                self._player_metrics(),
-                points_are_current=self._season_stats_current(str(league_id)),
-                market_rows=rows,
-                available_budget=available,
-            )
-            rows, _portfolio_squad, portfolio_summary = analyze_portfolio(
-                rows, squad_rows, available_budget=cash_balance,
-                season_started=self._season_mode_active(),
-                committed_budget=committed,
-            )
-            self._portfolio_summary = portfolio_summary
-        except Exception:
-            self._portfolio_summary = {}
+        worker.signals.failed.connect(self._market_enrichment_failed)
+        worker.signals.finished.connect(self._market_enrichment_finished)
+        QThreadPool.globalInstance().start(worker)
 
-        # Transparent position-relative price/performance score.
-        # We deliberately do not estimate or infer other managers' budgets.
-        rows = add_value_scores(rows)
+    def _market_enrichment_failed(self, message: str) -> None:
+        self._market_pending_enrichment = {}
+        self.statusBar().showMessage(
+            "Marktanalyse im Hintergrund fehlgeschlagen: " + str(message).splitlines()[0], 7000
+        )
+
+    def _market_enrichment_loaded(self, league_id: str, generation: int, result: dict) -> None:
+        if generation != getattr(self, "_market_load_generation", 0):
+            return
+        self._market_pending_enrichment = dict(result or {})
+
+    def _market_enrichment_finished(self) -> None:
+        self._market_enrichment_worker = None
+        self._market_enrichment_done = True
+        self._try_finalize_market_loading()
+
+    def _try_finalize_market_loading(self) -> None:
+        """Reveal the market exactly once all background data is ready.
+
+        The workers remain fully asynchronous; this method only merges already
+        completed results on the GUI thread. If an enrichment failed, the base
+        market payload is still shown rather than leaving the skeleton forever.
+        """
+        if not (getattr(self, "_market_enrichment_done", False) and getattr(self, "_market_status_done", False)):
+            return
+        generation = int(getattr(self, "_market_load_generation", 0))
+        if generation <= 0:
+            return
+
+        enrichment = getattr(self, "_market_pending_enrichment", None) or {}
+        rows = [dict(row) for row in (enrichment.get("rows") or getattr(self, "_market_pending_base_rows", []) or [])]
+        status_map = getattr(self, "_market_pending_statuses", None) or {}
+        for row in rows:
+            canonical = status_map.get(str(row.get("player_id") or ""))
+            if isinstance(canonical, dict):
+                row["status"] = canonical.get("status")
+                row["status_list"] = canonical.get("status_list") or []
 
         self._market_rows = rows
-        self._market_budget = available
-        try:
-            self.storage.record_market_decisions(str(league_id), rows)
-            self._market_backtest = self.storage.decision_backtest_summary(str(league_id))
-        except Exception:
-            self._market_backtest = {"evaluated": 0, "hit_rate": None}
+        self._portfolio_summary = enrichment.get("portfolio_summary") or {}
+        self._market_backtest = enrichment.get("backtest") or {"evaluated": 0, "hit_rate": None}
+
         self.market_count_card.value_label.setText(str(len(rows)))
         self.market_under_card.value_label.setText(str(sum(1 for r in rows if (r.get("price_delta") or 0) < 0)))
-        self.market_interest_card.value_label.setText(str(sum(1 for r in rows if r.get("action") in {"KADERZIEL", "INVEST", "BEOBACHTEN"})))
-        backtest = getattr(self, "_market_backtest", {}) or {}
+        self.market_interest_card.value_label.setText(
+            str(sum(1 for r in rows if r.get("action") in {"KADERZIEL", "INVEST", "BEOBACHTEN"}))
+        )
+        backtest = self._market_backtest
         hit_rate = backtest.get("hit_rate")
         spread = backtest.get("return_spread_7d")
         evaluated = int(backtest.get("evaluated") or 0)
@@ -844,15 +1006,25 @@ class MarketMixin:
             self.market_interest_card.hint_label.setText(f"7T BUY-vs-PASS Spread {spread:+.1f} pp · n={evaluated}")
         elif hit_rate is not None and evaluated >= 5:
             self.market_interest_card.hint_label.setText(f"7T-Modellcheck {hit_rate:.0f}% · n={evaluated}")
-        elif data.get("points_are_current") is False:
+        elif enrichment.get("points_are_current") is False:
             self.market_interest_card.hint_label.setText("Preseason · Modell lernt mit Historie")
-        else:
+        elif enrichment:
             self.market_interest_card.hint_label.setText("Entscheidungen werden für Backtests gespeichert")
-        self.market_budget_card.value_label.setText(euro(available))
-        capacity = squad_capacity(self._player_metrics())
-        self.market_budget_card.hint_label.setText(f"nach Geboten · Kader {capacity.current}/{capacity.maximum}")
+        else:
+            self.market_interest_card.hint_label.setText("Basisdaten geladen · Analyse derzeit nicht verfügbar")
+
+        league_id = str(self.league_combo.currentData() or self.storage.get_setting("league_id") or "")
+        if league_id:
+            self._refresh_mv_model_quality(league_id)
         self._apply_market_filters()
+        if getattr(self, "_market_table_skeleton", None) is not None:
+            self._market_table_skeleton.stop(animated=True)
+        if getattr(self, "_market_detail_skeleton", None) is not None:
+            self._market_detail_skeleton.stop(animated=True)
         self._update_deadline_chip()
+        self.market_status.setText(f"{len(rows)} Spieler · vollständig geladen")
+        self.market_refresh_btn.setEnabled(True)
+        self.market_refresh_btn.setText("MARKT AKTUALISIEREN")
         if self._coach_access_allowed() and self.stack.currentIndex() == 6:
             QTimer.singleShot(0, self._refresh_coach)
 
@@ -884,11 +1056,21 @@ class MarketMixin:
     def _market_overview_failed(self, message: str) -> None:
         self.market_status.setText("Transfermarkt konnte nicht geladen werden")
         self.statusBar().showMessage("Markt: " + message.splitlines()[0], 7000)
+        self.market_table.clearContents()
+        self.market_table.setRowCount(0)
+        if getattr(self, "_market_table_skeleton", None) is not None:
+            self._market_table_skeleton.stop(animated=False)
+        if getattr(self, "_market_detail_skeleton", None) is not None:
+            self._market_detail_skeleton.stop(animated=False)
 
     def _market_overview_finished(self) -> None:
         self._market_worker = None
-        self.market_refresh_btn.setEnabled(True)
-        self.market_refresh_btn.setText("MARKT AKTUALISIEREN")
+        if self._market_enrichment_worker is not None or self._market_status_worker is not None:
+            self.market_refresh_btn.setEnabled(False)
+            self.market_refresh_btn.setText("◌  ALLE DATEN WERDEN GELADEN …")
+        else:
+            self.market_refresh_btn.setEnabled(True)
+            self.market_refresh_btn.setText("MARKT AKTUALISIEREN")
 
     def _apply_market_filters(self, *_args) -> None:
         if not hasattr(self, "market_table"):
@@ -926,6 +1108,7 @@ class MarketMixin:
         roster_text = "KADER VOLL" if capacity.is_full else f"{capacity.free} Plätze frei"
         self.market_status.setText(f"{len(filtered)} von {len(self._market_rows)} Spielern · Kader {capacity.current}/{capacity.maximum} · {roster_text}")
 
+    @staticmethod
     def _market_expiry_sort(expires_at) -> float:
         if not expires_at:
             return float("inf")
@@ -934,6 +1117,7 @@ class MarketMixin:
         except (TypeError, ValueError):
             return float("inf")
 
+    @staticmethod
     def _format_market_expiry(expires_at) -> tuple[str, str]:
         if not expires_at:
             return "–", "Für Manager-Angebote liefert Kickbase keine vergleichbare Restlaufzeit."
@@ -958,6 +1142,7 @@ class MarketMixin:
         except (TypeError, ValueError):
             return "–", "Ablaufzeit konnte nicht gelesen werden."
 
+    @staticmethod
     def _market_expiry_seconds(expires_at) -> int | None:
         if not expires_at:
             return None
@@ -969,8 +1154,9 @@ class MarketMixin:
         except (TypeError, ValueError):
             return None
 
+    @staticmethod
     def _style_expiry_item(item: QTableWidgetItem, expires_at) -> None:
-        seconds = MainWindow._market_expiry_seconds(expires_at)
+        seconds = MarketMixin._market_expiry_seconds(expires_at)
         if seconds is None:
             item.setForeground(MUTED)
         elif seconds <= 3600:
@@ -1021,7 +1207,6 @@ class MarketMixin:
                 (euro(player.get("own_bid")) if player.get("own_bid") else "–", int(player.get("own_bid") or 0), None),
                 (str(player.get("value_score")) if player.get("value_score") is not None else "–", int(player.get("value_score") or -1), None),
                 (self._format_market_expiry(player.get("expires_at"))[0], self._market_expiry_sort(player.get("expires_at")), None),
-                (player.get("action") or player.get("portfolio_role") or "BEOBACHTEN", max(int(player.get("squad_fit_score") or 0), int(player.get("investment_score") or 0)), None),
             ]
             for c, (display, sort_value, icon) in enumerate(values):
                 item = table_item("" if c == 0 else display, sort_value, icon=icon)
@@ -1077,7 +1262,7 @@ class MarketMixin:
                     _display, expiry_tip = self._format_market_expiry(player.get("expires_at"))
                     item.setToolTip(expiry_tip)
                     self._style_expiry_item(item, player.get("expires_at"))
-                elif c in (7, 11):
+                elif c == 7:
                     item.setToolTip(player.get("analysis_text") or "")
                 table.setItem(r, c, item)
                 if c == 0:
@@ -1183,6 +1368,7 @@ class MarketMixin:
             self.market_detail_panel.setGraphicsEffect(None)
         self._update_market_detail(selected)
 
+    @staticmethod
     def _score_label(value: int | float | None) -> str:
         score = int(value or 0)
         if score >= 80:
@@ -1193,6 +1379,7 @@ class MarketMixin:
             return "NEUTRAL"
         return "SCHWACH"
 
+    @staticmethod
     def _format_market_reason_text(lines: list[str]) -> str:
         title = '<div style="font-weight:800; color:#F1F1EE; margin-bottom:4px;">EINSCHÄTZUNG</div>'
         if not lines:
@@ -1204,6 +1391,7 @@ class MarketMixin:
             body = items or '<div>Keine zusätzlichen Warnsignale.</div>'
         return f'<div style="line-height:1.45;">{title}{body}</div>'
 
+    @staticmethod
     def _format_market_history_empty() -> str:
         return (
             '<div style="line-height:1.4;">'
@@ -1212,6 +1400,7 @@ class MarketMixin:
             '</div>'
         )
 
+    @staticmethod
     def _format_market_history_text(hist: dict) -> str:
         title = '<div style="font-weight:800; color:#DDE6EC; margin-bottom:4px;">HISTORIE</div>'
         if hist.get("median_return_7d_pct") is None:

@@ -495,6 +495,7 @@ class AnalysisMixin:
             chart.setTitleFont(QFont(body_font_family(), 11, QFont.DemiBold))
         return chart
 
+    @staticmethod
     def _style_chart_axis(axis, *, grid: bool = True) -> None:
         axis.setLabelsColor(QColor("#A2ACB6"))
         axis.setLabelsFont(QFont(body_font_family(), 9))

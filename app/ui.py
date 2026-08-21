@@ -71,7 +71,7 @@ from .season import SEASON_MODE_START, current_season_start, season_label, seaso
 from .storage import Storage
 from .teams import team_name
 from .workers import FunctionWorker
-from .version import APP_DISPLAY_NAME
+from .version import APP_DISPLAY_NAME, __version__
 from .ui_v4_components import (
     ActivityFeed,
     DashboardFocusPanel,
@@ -155,6 +155,14 @@ class MainWindow(
         self._league_learning_worker: FunctionWorker | None = None
         self._league_learning: dict = {}
         self._market_worker: FunctionWorker | None = None
+        self._market_enrichment_worker: FunctionWorker | None = None
+        self._market_status_worker: FunctionWorker | None = None
+        self._market_load_generation: int = 0
+        self._market_pending_base_rows: list[dict] = []
+        self._market_pending_enrichment: dict | None = None
+        self._market_pending_statuses: dict | None = None
+        self._market_enrichment_done: bool = False
+        self._market_status_done: bool = False
         self._bid_worker: FunctionWorker | None = None
         self._market_scanner_worker: FunctionWorker | None = None
         self._market_scanner_dialog: MarketScannerDialog | None = None
@@ -264,7 +272,7 @@ class MainWindow(
             self.nav_analysis.setText("⚽   Spieltag" if active else "▥   Analyse")
             self._nav_full_texts[self.nav_analysis] = self.nav_analysis.text()
         if hasattr(self, "sidebar_footer_title"):
-            self.sidebar_footer_title.setText(f"KICKTRACK V5 · {'SAISON' if active else 'PRESEASON'} · {season_label()}")
+            self.sidebar_footer_title.setText(f"KICKTRACK V{__version__} · {'SAISON' if active else 'PRESEASON'} · {season_label()}")
         if hasattr(self, "dashboard_page_title"):
             self.dashboard_page_title.setText("SAISON COMMAND CENTER" if active else "PRESEASON COMMAND CENTER")
             self.dashboard_page_subtitle.setText(
@@ -398,7 +406,7 @@ class MainWindow(
         footer_layout = QVBoxLayout(self.sidebar_footer)
         footer_layout.setContentsMargins(12, 10, 12, 10)
         footer_layout.setSpacing(2)
-        self.sidebar_footer_title = QLabel(f"KICKTRACK V5 · PRESEASON · {season_label()}")
+        self.sidebar_footer_title = QLabel(f"KICKTRACK V{__version__} · PRESEASON · {season_label()}")
         self.sidebar_footer_title.setObjectName("SidebarFooterTitle")
         footer_hint = QLabel("SQLite Cache aktiv")
         footer_hint.setObjectName("SidebarFooterHint")

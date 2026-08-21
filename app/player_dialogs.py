@@ -137,7 +137,7 @@ from .ui_components import (
 )
 
 
-from .action_dialogs import SellPlayerDialog
+from .action_dialogs import ListingManagementDialog, SellPlayerDialog
 
 class MatchEventBreakdownDialog(QDialog):
     """Read-only breakdown of the Kickbase points awarded in one match."""
@@ -333,12 +333,22 @@ class PlayerDetailDialog(QDialog):
         header.addWidget(self.compare_btn)
 
         local_player = self.storage.get_player(self.player_id) or {}
-        self.sell_btn = QPushButton("VERKAUFEN")
-        self.sell_btn.setObjectName("Primary")
-        self.sell_btn.setToolTip("Spieler in Kickbase auf den Transfermarkt setzen oder Preis ändern")
-        self.sell_btn.clicked.connect(self._open_sell_player)
-        self.sell_btn.setVisible(str(local_player.get("player_status") or "") == "KADER")
-        header.addWidget(self.sell_btn)
+        self._is_owned_player = str(local_player.get("player_status") or "") == "KADER"
+
+        # Selling is intentionally split into two explicit concepts. "Anbieten"
+        # only creates a listing. Existing listings are managed separately, where
+        # the direct Kickbase sale is clearly labelled as its own write action.
+        self.list_player_btn = QPushButton("ANBIETEN")
+        self.list_player_btn.setObjectName("Primary")
+        self.list_player_btn.setToolTip("Spieler auf den Kickbase-Transfermarkt stellen")
+        self.list_player_btn.clicked.connect(self._open_sell_player)
+        header.addWidget(self.list_player_btn)
+
+        self.manage_listing_btn = QPushButton("LISTING VERWALTEN")
+        self.manage_listing_btn.setToolTip("Listenpreis ändern, vom Markt nehmen oder separat an Kickbase verkaufen")
+        self.manage_listing_btn.clicked.connect(self._open_listing_management)
+        header.addWidget(self.manage_listing_btn)
+        self._refresh_sale_actions()
 
         self.status_badge = QLabel(player_status_label(self.player))
         self.status_badge.setObjectName("PlayerStatusBadge")
@@ -676,6 +686,65 @@ class PlayerDetailDialog(QDialog):
         self.watchlist_btn.style().unpolish(self.watchlist_btn)
         self.watchlist_btn.style().polish(self.watchlist_btn)
 
+    def _host_main_window(self):
+        candidates = [self.window(), self.parent()]
+        parent = self.parent()
+        if parent is not None and hasattr(parent, "parent"):
+            try:
+                candidates.append(parent.parent())
+            except Exception:
+                pass
+        for candidate in candidates:
+            if candidate is not None and hasattr(candidate, "_own_listings_by_id"):
+                return candidate
+        return self.window()
+
+    def _current_own_listing(self) -> dict | None:
+        if self.player.get("listing_price") is not None:
+            return dict(self.player)
+        host = self._host_main_window()
+        listings = getattr(host, "_own_listings_by_id", {}) if host is not None else {}
+        listing = listings.get(str(self.player_id)) if isinstance(listings, dict) else None
+        return dict(listing) if isinstance(listing, dict) else None
+
+    def _refresh_sale_actions(self) -> None:
+        owned = bool(getattr(self, "_is_owned_player", False))
+        listing = self._current_own_listing() if owned else None
+        self.list_player_btn.setVisible(owned and listing is None)
+        self.manage_listing_btn.setVisible(owned and listing is not None)
+
+    def _open_listing_management(self) -> None:
+        if not self.league_id or self.client is None:
+            QMessageBox.warning(self, "Verkauf verwalten", "Keine aktive Liga bzw. Kickbase-Verbindung verfügbar.")
+            return
+        listing = self._current_own_listing()
+        if listing is None:
+            QMessageBox.information(
+                self,
+                "Kein aktives Listing",
+                "Für diesen Spieler ist aktuell kein eigenes Transfermarkt-Listing bekannt. Bitte Markt/Liga einmal aktualisieren.",
+            )
+            self._refresh_sale_actions()
+            return
+        dialog = ListingManagementDialog(
+            self, self.client, str(self.league_id), listing, refresh_callback=self._refresh_after_sale_write
+        )
+        dialog.exec()
+        self._refresh_sale_actions()
+
+    def _refresh_after_sale_write(self) -> None:
+        host = self._host_main_window()
+        if host is not None and hasattr(host, "_load_market_overview"):
+            try:
+                host._load_market_overview()
+            except Exception:
+                pass
+        if host is not None and hasattr(host, "sync"):
+            try:
+                host.sync()
+            except Exception:
+                pass
+
     def _open_sell_player(self) -> None:
         if not self.league_id or self.client is None:
             QMessageBox.warning(self, "Verkaufen", "Keine aktive Liga bzw. Kickbase-Verbindung verfügbar.")
@@ -714,6 +783,18 @@ class PlayerDetailDialog(QDialog):
                     "aber noch nicht bestätigt werden. Bitte Markt aktualisieren und den Preis prüfen."
                 )),
             )
+        self.player["listing_price"] = amount
+        self.player["price"] = amount
+        host = self._host_main_window()
+        if host is not None:
+            listings = getattr(host, "_own_listings_by_id", None)
+            if isinstance(listings, dict):
+                listing = dict(self.player)
+                listing["listing_price"] = amount
+                listing["price"] = amount
+                listings[str(self.player_id)] = listing
+        self._refresh_sale_actions()
+
         host = self.window()
         parent = self.parent()
         for candidate in (host, parent, getattr(parent, "parent", lambda: None)() if parent else None):

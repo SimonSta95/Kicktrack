@@ -583,6 +583,14 @@ class LeagueMixin:
         self._populate_own_listings(data.get("own_listings") or [])
 
     def _populate_own_listings(self, listings: list[dict]) -> None:
+        # Keep a lightweight live index so player detail dialogs can distinguish
+        # "auf den Markt stellen" from "bestehendes Listing verwalten" without
+        # issuing another hidden API request.
+        self._own_listings_by_id = {
+            str(player.get("player_id")): dict(player)
+            for player in (listings or [])
+            if isinstance(player, dict) and player.get("player_id") is not None
+        }
         if not hasattr(self, "own_listings_table"):
             return
         current_by_id = {

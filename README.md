@@ -1,4 +1,4 @@
-# KickTrack V6.0.0
+# KickTrack V6.1.5
 
 
 **Private Kickbase Analytics · Preseason + Season Command Center für Windows**
@@ -11,6 +11,87 @@ KickTrack automatisiert keine Transfers. Schreibende Aktionen wie ein Gebot werd
 
 ## Aktueller Stand
 
+### V6.1.5 – Smooth Pulse Skeleton
+
+- Der bewegte Shimmer-Balken wurde durch einen **MUI-artigen Pulse-Skeleton** ersetzt. Das wirkt bei CPU-lastiger Hintergrundanalyse deutlich gleichmäßiger, weil keine 50/60-FPS-Positionsanimation mehr nötig ist.
+- Die Skeleton-Geometrie bleibt vollständig gecacht. Animiert wird nur die Opazität einer bereits gerasterten Highlight-Ebene über Qt's Unified Animation Driver.
+- Dadurch entfallen Timer-Jitter, das Erzeugen temporärer Shimmer-Pixmaps pro Frame und große Repaint-Flächen während des Markt-Enrichments.
+- Der Markt bleibt weiterhin vollständig asynchron und das Skeleton sichtbar, bis Status + Analyse fertig sind.
+- Der anschließende Fade-In der echten Marktdaten bleibt erhalten.
+- Versionsanzeigen in App, `pyproject.toml` und README auf V6.1.5 angehoben.
+
+### V6.1.4 – Cached Shimmer Rendering
+
+- Das Markt-Skeleton rendert seine komplette statische Geometrie nicht mehr bei jedem Animationsframe neu. Hintergrund, Tabellenzeilen, Avatar-/Logo-Platzhalter und Pills werden als Pixmap gecacht und nur bei Größen- oder Spaltenänderungen neu aufgebaut.
+- Für die Animation wird nur noch ein schmales Shimmer-Band über eine separat gecachte Alpha-Maske gelegt. Dadurch werden ausschließlich die Skeleton-Flächen aufgehellt, ohne jedes Element pro Frame erneut zu zeichnen.
+- Repaints sind auf die Vereinigung aus alter und neuer Bandposition begrenzt; große Markt- und Detailflächen werden nicht mehr 50–60 Mal pro Sekunde vollständig invalidiert.
+- Der Timer läuft bewusst mit 50 FPS und `PreciseTimer`. Die Bewegung bleibt zeitbasiert, wirkt gleichmäßig, erzeugt aber deutlich weniger Paint-Last als der vorherige Full-Repaint-Ansatz.
+- Skeleton-Caches werden bei Resize sowie bei geänderten Tabellen-Spalten automatisch invalidiert. Daten-Loading und Enrichment bleiben vollständig asynchron.
+- Versionsanzeigen in App, `pyproject.toml` und README auf V6.1.4 angehoben.
+
+### V6.1.3 – Smooth 60-FPS Shimmer
+
+- Der Markt-Skeleton-Shimmer läuft jetzt mit einem ca. **16-ms-Takt (~60 FPS)** statt der sichtbar stufigen 25-FPS-Animation.
+- Die Shimmer-Position wird nicht mehr pro Timer-Tick weitergezählt, sondern aus der tatsächlich verstrichenen Zeit berechnet. Dadurch bleibt die Bewegung auch bei kurz verzögerten Qt-Timer-Frames gleichmäßig und beschleunigt bzw. verlangsamt sich nicht ungewollt.
+- Ein kompletter Shimmer-Durchlauf dauert ca. **1,15 Sekunden**, wodurch der Loading-State deutlich näher an Skeletons moderner Web-UI-Frameworks wirkt.
+- Der Daten-Ladepfad bleibt unverändert asynchron; die höhere visuelle Framerate betrifft nur das leichte Paint-Overlay und blockiert die App nicht.
+- Versionsanzeigen in App, `pyproject.toml` und README auf V6.1.3 angehoben.
+
+### V6.1.2 – Animated Web-Style Skeletons
+
+- Der Transfermarkt nutzt jetzt einen **echten animierten Shimmer-Skeleton-State** wie moderne Web-UI-Frameworks statt statischer Blockzeichen.
+- Die Skeletons werden als reine Paint-Overlays gerendert. Es werden keine Fake-Tabellenwerte mehr erzeugt; Netzwerk, Status-Sync und Analyse bleiben vollständig in Background-Workern.
+- Spieler-, Vereins-, Zahlen- und Ablaufspalten erhalten passende Placeholder-Formen; Avatar und Vereinslogo werden als runde Skeleton-Flächen dargestellt.
+- Auch die rechte Markt-Detailansicht erhält während des Full-Loads einen abgestimmten Skeleton-State mit Portrait-, Karten- und Score-Platzhaltern.
+- Die Animation läuft bewusst nur mit etwa 25 FPS und einem subtilen Highlight-Band, damit der Loading-State selbst den UI-Thread nicht unnötig belastet.
+- Sobald alle Daten fertig sind, liegt die fertige Tabelle bereits unter dem Overlay und das Skeleton blendet in ca. 180 ms weich aus. Bei Ladefehlern wird es sofort entfernt statt hängen zu bleiben.
+- Versionsanzeigen in App, `pyproject.toml` und README auf V6.1.2 angehoben.
+
+### V6.1.1 – Full Skeleton Until Ready
+
+- Der Transfermarkt zeigt jetzt bewusst ein Skeleton, bis **Marktdaten, Statusdaten und analytische Anreicherung vollständig** geladen sind.
+- Die Worker bleiben vollständig asynchron; die Oberfläche friert während des Ladens nicht ein.
+- Halb fertige Tabellen mit bereits sichtbaren Spielern und noch leeren Analysefeldern werden nicht mehr angezeigt.
+- Markt-, Status- und Analyse-Ergebnisse werden zunächst zwischengespeichert und erst nach Abschluss zusammengeführt und in einem Schritt gerendert.
+- Auch bei einem Fehler in Status- oder Analyse-Enrichment bleibt die UI nicht dauerhaft im Skeleton hängen: Dann werden die verfügbaren Basisdaten freigegeben und der Fehler separat gemeldet.
+- Versionsanzeigen in App, `pyproject.toml` und README auf V6.1.1 angehoben.
+
+### V6.1.0 – Responsive Market Loading + Skeleton States
+
+- Der Transfermarkt nutzt jetzt einen **progressiven Ladepfad**: Markt + Budget werden zuerst geladen und sofort angezeigt; auf 22U-Prognosen, Portfolioanalyse, Value-Scoring oder Status-Sync muss die Tabelle nicht mehr warten.
+- Beim kalten Erstaufruf erscheint eine leichte **Skeleton-Tabelle** statt eines leeren/festgefrorenen Screens. Bewusst ohne teure Shimmer-Animation, damit der Loading-State selbst keine Renderlast erzeugt.
+- Canonical Player-Status und analytische Markt-Anreicherung laufen in **separaten `FunctionWorker`-Jobs**. Der Qt-UI-Thread übernimmt nur noch das Rendern der Ergebnisse.
+- 22U-Modell, MW-Snapshots, Prediction-Evaluation, Portfolioanalyse, Value-Scoring und Decision-Backtest wurden aus dem synchronen UI-Callback in den Background-Enrichment-Worker verschoben.
+- Eine Refresh-Generation verhindert, dass verspätete Ergebnisse eines älteren Markt-Loads aktuelle Daten überschreiben. Während Background-Jobs laufen, wird kein zweiter konkurrierender Markt-Refresh gestartet.
+- Vorhandene Marktdaten bleiben bei späteren Refreshes sichtbar; Skeletons werden nur beim ersten Laden ohne vorhandene Daten eingeblendet.
+- Architekturtests sichern den Fast-Path und die getrennten Markt-Worker ab.
+- Versionsanzeigen in App, `pyproject.toml` und README auf V6.1.0 angehoben.
+
+### V6.0.3 – Markt-Ladeabbruch nach Refactor gefixt
+
+- Einen verbliebenen Altverweis auf `MainWindow._market_expiry_seconds(...)` im `MarketMixin` entfernt. Nach dem V6-Split existiert `MainWindow` dort absichtlich nicht mehr; der Fehler hat die Tabellenbefüllung nach dem ersten Spieler abgebrochen.
+- Dadurch lädt der Transfermarkt wieder vollständig statt nach der ersten Zeile mit `NameError` stehenzubleiben.
+- Architekturtest ergänzt: Refaktorierte Mixins dürfen nicht mehr direkt auf `MainWindow.` verweisen. So fällt dieser Fehler künftig bereits im Testlauf auf.
+- Versionsanzeigen und README auf V6.0.3 angehoben.
+
+### V6.0.2 – Markt-/Verkaufs-UX nach Refactor repariert
+
+- Die Transfermarkt-Tabelle ist wieder lesbar: überflüssige doppelte Empfehlungsspalte entfernt, Spaltenbreiten neu gesetzt und der Master/Detail-Splitter gegen zu starke Kompression abgesichert.
+- Der Spieler-Header verwendet nicht mehr den irreführenden Sammelbutton `VERKAUFEN`. Ein nicht gelisteter eigener Spieler hat jetzt die klare Aktion **ANBIETEN**; ein bereits gelisteter Spieler erhält **LISTING VERWALTEN**.
+- Das Listing-Management bleibt bewusst getrennt vom direkten **AN KICKBASE VERKAUFEN**. Der verifizierte `/sell`-Write bleibt ausschließlich dort und wird nicht mit dem Anbieten vermischt.
+- Eigene Listings werden nach dem Liga-/Markt-Laden in einem Live-Index gehalten, damit Player-Detail-Dialoge den korrekten Verkaufszustand anzeigen, ohne versteckte Zusatzrequests auszulösen.
+- Der Dialog zum Erstellen eines Listings heißt jetzt `Spieler anbieten` und bestätigt mit `ANBIETEN` statt mit einem generischen Verkaufslabel.
+- Vollständige Testsuite: 155 Tests bestanden.
+- Versionsanzeigen und README auf V6.0.2 angehoben.
+
+### V6.0.1 – Runtime-Fix nach V6-Refactor
+
+- Kritischen Refactor-Regressionsfehler behoben: Beim Aufteilen von `ui.py` waren mehrere `@staticmethod`-Dekoratoren verloren gegangen. Dadurch wurden Helper wie `_style_chart_axis()` und `_format_market_expiry()` fälschlich als Instanzmethoden gebunden und Dashboard/Markt brachen beim Laden mit `TypeError` ab.
+- Sämtliche beim Split betroffenen statischen Helper in `market_mixin.py` und `analysis_mixin.py` wieder korrekt deklariert.
+- Die Sidebar zeigt die Version nicht mehr hart codiert als `V5`, sondern liest `__version__` aus der zentralen Versionsquelle.
+- Architekturtest ergänzt, der in den refaktorierten Mixins Methoden ohne `self`/`cls` und ohne passenden `@staticmethod`/`@classmethod`-Decorator künftig als Fehler erkennt.
+- Versionsanzeigen und README auf V6.0.1 angehoben.
+
 ### V6.0.0 – Full Architecture Refactor
 
 - Die frühere UI-Monolith-Datei `app/ui.py` wurde von über 10.000 Zeilen auf rund 1.500 Zeilen reduziert und dient jetzt primär als **Composition Root** für das Hauptfenster. Markt, Intelligence, Coach, Sync, Dashboard/Kader, Liga und Transfer-/Analysefunktionen liegen in klar getrennten Feature-Mixins.
@@ -21,7 +102,7 @@ KickTrack automatisiert keine Transfers. Schreibende Aktionen wie ein Gebot werd
 - Fachliche Berechnungen, Datenbank-Schema, bestehende API-Semantik und Nutzerflows wurden beim Refactor bewusst nicht neu erfunden; Ziel dieser Version ist Struktur, Wartbarkeit und geringeres Änderungsrisiko.
 - Vollständige Testsuite bleibt grün. Versionsanzeigen und README auf V6.0.0 angehoben.
 
-### V5.6.0 – Cleanup & UI-Refactor
+### V5.6.0 – Senior-Dev Cleanup & UI-Refactor
 
 - Die zuletzt gewachsene Performance-Balkenansicht wurde aus der über 10.000 Zeilen großen `app/ui.py` in das eigenständige Modul `app/performance_chart.py` ausgelagert. Das Widget ist jetzt UI-agnostischer und erhält Club-Icons sowie Datumsformatierung über Callbacks statt über harte Abhängigkeiten.
 - Die Versionsanzeige ist in `app/version.py` zentralisiert. `main.py` und das Hauptfenster verwenden jetzt dieselbe `APP_DISPLAY_NAME`-Konstante; ein Regressionstest hält App- und `pyproject.toml`-Version synchron.

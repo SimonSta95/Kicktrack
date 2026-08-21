@@ -317,7 +317,7 @@ class SyncMixin:
             return
         busy = any((
             self._sync_worker, self._league_analysis_worker, self._league_ownership_worker,
-            self._market_worker, self._budget_worker, self._intelligence_worker, self._league_learning_worker,
+            self._market_worker, self._market_enrichment_worker, self._market_status_worker, self._budget_worker, self._intelligence_worker, self._league_learning_worker,
         ))
         if busy:
             self.statusBar().showMessage("Force Update wartet: Es läuft bereits eine Aktualisierung.", 6000)
@@ -344,7 +344,7 @@ class SyncMixin:
             return
         busy = any((
             self._sync_worker, self._league_analysis_worker, self._league_ownership_worker,
-            self._market_worker, self._budget_worker, self._intelligence_worker, self._league_learning_worker,
+            self._market_worker, self._market_enrichment_worker, self._market_status_worker, self._budget_worker, self._intelligence_worker, self._league_learning_worker,
         ))
         if busy or self._force_ownership_pending:
             QTimer.singleShot(300, self._poll_force_update_finished)
