@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from bisect import bisect_left, bisect_right
 from datetime import date, timedelta
 from statistics import median
 from typing import Iterable
@@ -120,6 +121,27 @@ def build_predictions(
     """
     series = _daily_series(rows)
     samples = _historical_samples(series)
+    # Index historical samples once. Previously every prediction scanned the
+    # complete calibration corpus one or two times, which became very expensive
+    # after reliable 365-day histories were introduced for hundreds of players.
+    samples_by_sign: dict[int, list[dict]] = {-1: [], 0: [], 1: []}
+    for sample in samples:
+        sample_sign = 1 if sample["d1"] > 0 else (-1 if sample["d1"] < 0 else 0)
+        samples_by_sign[sample_sign].append(sample)
+    magnitudes_by_sign: dict[int, list[int]] = {}
+    for sample_sign, bucket in samples_by_sign.items():
+        bucket.sort(key=lambda item: abs(int(item["d1"])))
+        magnitudes_by_sign[sample_sign] = [abs(int(item["d1"])) for item in bucket]
+
+    def magnitude_candidates(sample_sign: int, low: float, high: float) -> list[dict]:
+        bucket = samples_by_sign.get(sample_sign) or []
+        magnitudes = magnitudes_by_sign.get(sample_sign) or []
+        if not bucket:
+            return []
+        left = bisect_left(magnitudes, max(0, int(low)))
+        right = bisect_right(magnitudes, max(0, int(high)))
+        return bucket[left:right]
+
     current_values = {str(k): int(v) for k, v in (current_values or {}).items() if v is not None}
     current_deltas = {str(k): int(v) for k, v in (current_deltas or {}).items() if v is not None}
     if isinstance(target_date, date):
@@ -131,7 +153,10 @@ def build_predictions(
 
     result: dict[str, dict] = {}
 
+    active_player_ids = set(current_values) if current_values else None
     for player_id, points in series.items():
+        if active_player_ids is not None and player_id not in active_player_ids:
+            continue
         if not points:
             continue
         latest_day, latest_stored = points[-1]
@@ -184,21 +209,14 @@ def build_predictions(
         # if that would leave too little evidence.
         sign = 1 if latest_delta > 0 else (-1 if latest_delta < 0 else 0)
         magnitude = max(abs(latest_delta), 1)
+        candidates = magnitude_candidates(sign, magnitude * 0.50, magnitude * 1.50)
         analogs = [
-            s for s in samples
-            if (1 if s["d1"] > 0 else (-1 if s["d1"] < 0 else 0)) == sign
-            and abs(s["d1"]) >= magnitude * 0.50
-            and abs(s["d1"]) <= magnitude * 1.50
-            and s["market_value"] >= current * 0.40
+            s for s in candidates
+            if s["market_value"] >= current * 0.40
             and s["market_value"] <= current * 2.50
         ]
         if len(analogs) < 20:
-            analogs = [
-                s for s in samples
-                if (1 if s["d1"] > 0 else (-1 if s["d1"] < 0 else 0)) == sign
-                and abs(s["d1"]) >= magnitude * 0.40
-                and abs(s["d1"]) <= magnitude * 1.80
-            ]
+            analogs = magnitude_candidates(sign, magnitude * 0.40, magnitude * 1.80)
 
         bias = int(round(median([s["error"] for s in analogs]))) if analogs else 0
         # Calibration is intentionally weak. The persistence signal is the part

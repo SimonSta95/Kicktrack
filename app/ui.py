@@ -93,7 +93,7 @@ from .squad_analysis import enrich_squad_entries
 from .coach_analysis import build_coach_recommendations
 from .portfolio_analysis import analyze_portfolio
 from .transfer_evaluation import evaluate_trade_cycles, transfer_evaluation_summary
-from .preseason_tools import add_value_scores, optimize_starting_squad
+from .preseason_tools import optimize_starting_squad
 from .squad_rules import MAX_SQUAD_SIZE, active_bid_count, squad_capacity
 from .player_master import sync_player_master, sync_missing_portraits, cache_review_candidate
 from .league_learning import (
@@ -108,6 +108,8 @@ from .intelligence import (
 
 
 from .ui_components import (
+    MarketTrendIconDelegate,
+    MarketTrendLegend,
     AccountChip,
     BudgetBidList,
     ChartPanel,
@@ -120,7 +122,8 @@ from .ui_components import (
     ResponsiveTableWidget,
     compact_number,
     euro,
-    refresh_style
+    refresh_style,
+    SquadRoleDelegate
 )
 from .dialogs import (
     ManagerDetailDialog,
@@ -182,6 +185,9 @@ class MainWindow(
         self._intelligence_data: dict = {}
         self._force_update_active = False
         self._force_ownership_pending = False
+        # Navigation cache: switching between already rendered tabs must be instant.
+        # Explicit sync/league changes invalidate this state.
+        self._page_loaded_league: dict[int, str] = {}
         self.setWindowTitle(APP_DISPLAY_NAME)
         self._fade = FadeController()
         self._global_search_lookup: dict[str, str] = {}
@@ -382,10 +388,6 @@ class MainWindow(
             button.clicked.connect(lambda checked=False, i=index, b=button: self._switch_page(i, b))
             layout.addWidget(button)
 
-        self.nav_market.clicked.connect(lambda checked=False: self._ensure_market_overview())
-        self.nav_league.clicked.connect(lambda checked=False: self._ensure_league_data())
-        self.nav_analysis.clicked.connect(lambda checked=False: self._load_intelligence())
-        self.nav_coach.clicked.connect(lambda checked=False: self._refresh_coach())
         layout.addStretch()
 
         lower_label = QLabel("SYSTEM")
@@ -544,13 +546,53 @@ class MainWindow(
             self._fade.fade_in(self.stack.currentWidget(), 135)
         for button in self.nav_buttons:
             button.setChecked(button is active_button)
-        # Some tables sit on tabs that were hidden during initial layout. Refit their
-        # columns after the new page becomes visible so they use the full width.
+        # Hidden pages are deliberately lazy-loaded.  Startup and league changes
+        # therefore refresh only the page the user is actually looking at instead
+        # of executing every expensive DB/model path on the GUI thread.
         QTimer.singleShot(0, self._apply_responsive_layout)
         QTimer.singleShot(0, self._update_manager_status_strip)
+        league_id = self.league_combo.currentData() if hasattr(self, "league_combo") else None
+        QTimer.singleShot(0, lambda i=index, lid=str(league_id) if league_id else None: self._refresh_visible_page(i, lid))
+
+    def _invalidate_page_cache(self, *indexes: int) -> None:
+        if not indexes:
+            self._page_loaded_league.clear()
+            return
+        for index in indexes:
+            self._page_loaded_league.pop(int(index), None)
+
+    def _refresh_visible_page(
+        self, index: int | None = None, league_id: str | None = None, *, force: bool = False
+    ) -> None:
+        index = self.stack.currentIndex() if index is None else int(index)
+        if league_id is None:
+            current = self.league_combo.currentData() if hasattr(self, "league_combo") else None
+            league_id = str(current) if current else self.storage.get_setting("league_id")
+        league_key = str(league_id or "")
+
+        # A pure tab switch must not recompute expensive DB/model views. Market
+        # has its own in-memory cache and remains independently refreshable.
+        if not force and index != 2 and self._page_loaded_league.get(index) == league_key:
+            return
+
         if index == 0:
-            league_id = self.league_combo.currentData() if hasattr(self, "league_combo") else None
-            QTimer.singleShot(0, lambda lid=str(league_id) if league_id else None: self._refresh_dashboard(lid))
+            self._refresh_dashboard(league_id)
+        elif index == 1:
+            self._refresh_squad()
+        elif index == 2:
+            self._ensure_market_overview()
+        elif index == 3:
+            self._ensure_league_data()
+        elif index == 4:
+            self._refresh_transfers(league_id)
+        elif index == 5:
+            self._load_intelligence()
+        elif index == 6:
+            self._refresh_coach()
+        else:
+            return
+        if index != 2:
+            self._page_loaded_league[index] = league_key
 
     def _page_header(self, title_text: str, subtitle_text: str) -> tuple[QLabel, QLabel]:
         title = QLabel(title_text)
@@ -689,6 +731,9 @@ class MainWindow(
         layout.addLayout(summary)
 
         self.squad_pitch = SquadPitchWidget()
+        # Keep the formation useful without letting it consume most of the
+        # viewport. The detail table is the primary working surface in this tab.
+        self.squad_pitch.setMinimumHeight(270)
         self.squad_pitch.set_formation(self.storage.get_setting("squad_pitch_formation", "AUTO"))
         self.squad_pitch.formationChanged.connect(
             lambda formation: self.storage.set_setting("squad_pitch_formation", formation)
@@ -711,10 +756,10 @@ class MainWindow(
         )
         layout.addWidget(self.squad_bench)
 
-        status_panel = QFrame()
-        status_panel.setObjectName("Panel")
-        status_panel.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Maximum)
-        status_layout = QVBoxLayout(status_panel)
+        self.squad_status_panel = QFrame()
+        self.squad_status_panel.setObjectName("Panel")
+        self.squad_status_panel.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Maximum)
+        status_layout = QVBoxLayout(self.squad_status_panel)
         status_layout.setContentsMargins(16, 14, 16, 14)
         status_layout.setSpacing(8)
         status_head = QHBoxLayout()
@@ -744,7 +789,7 @@ class MainWindow(
         self.squad_status_empty.setAlignment(Qt.AlignCenter)
         self.squad_status_empty.setVisible(False)
         status_layout.addWidget(self.squad_status_empty)
-        layout.addWidget(status_panel)
+        layout.addWidget(self.squad_status_panel)
 
         section_row = QHBoxLayout()
         section = QLabel("KADER · DETAILANSICHT")
@@ -757,16 +802,33 @@ class MainWindow(
         section_row.addWidget(self.squad_info_btn)
         layout.addLayout(section_row)
 
+        # The cells intentionally show icons only. Keep the meaning visible on
+        # the page as well, so users do not have to discover every state via
+        # hover tooltips.
+        self.squad_trend_legend = MarketTrendLegend()
+        layout.addWidget(self.squad_trend_legend)
+
         self.squad_table = self._make_table(
-            ["SPIELER", "VEREIN", "POS", "ROLLE", "MARKTWERT", "24H", "22U", "P/L", "STARTKADER", "TRADE", "AKTION"],
-            [180, 140, 56, 170, 122, 80, 80, 96, 86, 86, 155],
+            ["SPIELER", "VEREIN", "POS", "ROLLE", "MARKTWERT", "24H", "22U", "P/L", "DYNAMIK", "WENDE", "AKTION"],
+            [180, 140, 56, 170, 122, 80, 80, 96, 120, 86, 155],
         )
+        self.squad_table.setItemDelegateForColumn(8, MarketTrendIconDelegate(self.squad_table))
         self.squad_table.set_responsive_widths(
-            [180, 140, 56, 170, 122, 80, 80, 96, 86, 86, 155],
-            [142, 115, 52, 158, 106, 70, 70, 84, 76, 76, 136],
+            [180, 140, 56, 170, 122, 80, 80, 96, 120, 86, 155],
+            [142, 115, 52, 158, 106, 70, 70, 84, 104, 76, 136],
         )
         self.squad_table.setItemDelegateForColumn(1, ClubItemDelegate(self.squad_table))
         self.squad_table.setItemDelegateForColumn(10, RecommendationChipDelegate(self.squad_table))
+        # Keep every squad cell as a real QTableWidgetItem so Qt can sort whole
+        # rows atomically. The role selector is now a transient delegate editor,
+        # never a persistent cell widget. This restores the stable sorting model
+        # used by the older working squad table.
+        self.squad_role_delegate = SquadRoleDelegate(self.squad_table)
+        self.squad_role_delegate.roleChanged.connect(self._set_player_role)
+        self.squad_table.setItemDelegateForColumn(3, self.squad_role_delegate)
+        self.squad_table.setSortingEnabled(True)
+        self.squad_table.horizontalHeader().setSectionsClickable(True)
+        self.squad_table.cellClicked.connect(self._edit_squad_role_cell)
         # The Kader table never owns vertical scrolling. A squad is capped at
         # 18 players, so showing all rows at once is both feasible and much nicer
         # to navigate. The surrounding page scroll area now owns the vertical
@@ -775,9 +837,19 @@ class MainWindow(
         self.squad_table.setVerticalScrollMode(QTableWidget.ScrollPerPixel)
         self.squad_table.verticalHeader().setDefaultSectionSize(48)
         self.squad_table.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
-        self.squad_table.setMinimumHeight(0)
+        # Reserve a useful working area even before the first refresh completes.
+        # The exact height is updated from the real row count in _refresh_squad.
+        self.squad_table.setMinimumHeight(430)
         self.squad_table.itemDoubleClicked.connect(self._open_player_detail)
         layout.addWidget(self.squad_table)
+
+        # The detail table is the day-to-day working surface. Keep bank and
+        # availability context below it so the list starts materially higher on
+        # normal desktop viewports instead of exposing only a few rows.
+        layout.removeWidget(self.squad_bench)
+        layout.removeWidget(self.squad_status_panel)
+        layout.addWidget(self.squad_bench)
+        layout.addWidget(self.squad_status_panel)
         self._add_scroll_page(page)
 
     def _open_status_player_detail(self, item: QTableWidgetItem) -> None:
@@ -1000,9 +1072,9 @@ class MainWindow(
         listings_layout.setSpacing(10)
         listings_head = QHBoxLayout()
         listings_title_box = QVBoxLayout()
-        listings_title = QLabel("EIGENE ANGEBOTE")
+        listings_title = QLabel("EIGENE LISTINGS")
         listings_title.setObjectName("SectionTitle")
-        listings_sub = QLabel("Spieler auf deiner Transferliste · Erlös nach aktueller Kickbase-Mindestpreisregel")
+        listings_sub = QLabel("Spieler auf deiner Transferliste · Listing verwalten oder konkrete Angebote prüfen")
         listings_sub.setObjectName("Tiny")
         listings_title_box.addWidget(listings_title)
         listings_title_box.addWidget(listings_sub)
@@ -1015,11 +1087,11 @@ class MainWindow(
 
         self.own_listings_table = self._make_table(
             ["SPIELER", "VEREIN", "POS", "STATUS", "MARKTWERT", "24H", "LISTENPREIS", "AKTUELLER ERLÖS", "Δ ZUM MW", "ROLLE", "AKTION"],
-            [190, 135, 56, 150, 120, 80, 120, 135, 105, 110, 115],
+            [190, 135, 56, 150, 120, 80, 120, 135, 105, 110, 190],
         )
         self.own_listings_table.set_responsive_widths(
-            [190, 135, 56, 150, 120, 80, 120, 135, 105, 110, 115],
-            [155, 115, 50, 125, 105, 70, 105, 115, 90, 95, 100],
+            [190, 135, 56, 150, 120, 80, 120, 135, 105, 110, 190],
+            [155, 115, 50, 125, 105, 70, 105, 115, 90, 95, 160],
         )
         self.own_listings_table.setItemDelegateForColumn(1, ClubItemDelegate(self.own_listings_table))
         self.own_listings_table.verticalHeader().setDefaultSectionSize(48)
@@ -1459,13 +1531,15 @@ class MainWindow(
             self._resize_table_columns(table)
 
     def refresh_all(self) -> None:
+        """Refresh only the visible page.
+
+        Historically this method refreshed every page after login/league changes.
+        That was tolerable with tiny local history tables, but became a startup
+        freeze after real 365-day histories and prediction models were added.
+        """
         league_id = self.league_combo.currentData()
         league_id = str(league_id) if league_id else self.storage.get_setting("league_id")
-        self._refresh_dashboard(league_id)
-        self._refresh_squad()
-        self._refresh_league_page(league_id)
-        self._refresh_transfers(league_id)
-        self._refresh_analysis()
+        self._refresh_visible_page(self.stack.currentIndex(), league_id, force=True)
 
     def closeEvent(self, event) -> None:
         self.client.close()

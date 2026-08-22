@@ -1362,6 +1362,7 @@ class Storage:
         """
         payload = []
         now = datetime.now(UTC).replace(microsecond=0)
+        local_today = now.astimezone(ZoneInfo("Europe/Berlin")).date()
 
         for row in rows or []:
             try:
@@ -1375,7 +1376,7 @@ class Storage:
             # day before the 22:00 refresh. That row still represents the last
             # completed refresh and would duplicate yesterday's value. Keep
             # today's value exclusively from a real live observation.
-            if value <= 0 or parsed_day >= now.date():
+            if value <= 0 or parsed_day >= local_today:
                 continue
 
             raw_recorded_at = str(row.get("recorded_at") or "").strip()
@@ -1547,6 +1548,26 @@ class Storage:
             """SELECT player_id, value, snapshot_date, recorded_at
                FROM market_values
                ORDER BY snapshot_date ASC, player_id ASC"""
+        ).fetchall()
+        return [dict(row) for row in rows]
+
+    def market_value_rows_for_players(self, player_ids) -> list[dict]:
+        """Return history only for the requested players.
+
+        UI pages such as Transfers only need history for a small set of players.
+        Reading the complete prediction corpus there became increasingly costly
+        after the 365-day backfill was introduced.
+        """
+        ids = list(dict.fromkeys(str(pid) for pid in (player_ids or []) if str(pid or "").strip()))
+        if not ids:
+            return []
+        placeholders = ",".join("?" for _ in ids)
+        rows = self.conn.execute(
+            f"""SELECT player_id, value, snapshot_date, recorded_at
+                FROM market_values
+                WHERE player_id IN ({placeholders})
+                ORDER BY snapshot_date ASC, player_id ASC""",
+            ids,
         ).fetchall()
         return [dict(row) for row in rows]
 

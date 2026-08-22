@@ -137,7 +137,7 @@ from .ui_components import (
 )
 
 
-from .action_dialogs import ListingManagementDialog, SellPlayerDialog
+from .action_dialogs import ListingManagementDialog, OfferInboxDialog, SellPlayerDialog
 
 class MatchEventBreakdownDialog(QDialog):
     """Read-only breakdown of the Kickbase points awarded in one match."""
@@ -335,19 +335,25 @@ class PlayerDetailDialog(QDialog):
         local_player = self.storage.get_player(self.player_id) or {}
         self._is_owned_player = str(local_player.get("player_status") or "") == "KADER"
 
-        # Selling is intentionally split into two explicit concepts. "Anbieten"
-        # only creates a listing. Existing listings are managed separately, where
-        # the direct Kickbase sale is clearly labelled as its own write action.
-        self.list_player_btn = QPushButton("ANBIETEN")
+        # Selling has two explicit entry points only: LISTING manages transfer-list
+        # state, ANGEBOTE contains every concrete sale offer (Kickbase + managers).
+        self.list_player_btn = QPushButton("AUF MARKT")
         self.list_player_btn.setObjectName("Primary")
         self.list_player_btn.setToolTip("Spieler auf den Kickbase-Transfermarkt stellen")
         self.list_player_btn.clicked.connect(self._open_sell_player)
         header.addWidget(self.list_player_btn)
 
-        self.manage_listing_btn = QPushButton("LISTING VERWALTEN")
-        self.manage_listing_btn.setToolTip("Listenpreis ändern, vom Markt nehmen oder separat an Kickbase verkaufen")
+        self.manage_listing_btn = QPushButton("LISTING")
+        self.manage_listing_btn.setObjectName("CompactDangerActionButton")
+        self.manage_listing_btn.setToolTip("Listenpreis ändern oder Spieler vom Markt nehmen")
         self.manage_listing_btn.clicked.connect(self._open_listing_management)
         header.addWidget(self.manage_listing_btn)
+
+        self.offers_btn = QPushButton("ANGEBOTE")
+        self.offers_btn.setObjectName("CompactDangerActionButton")
+        self.offers_btn.setToolTip("Kickbase- und Manager-Angebote anzeigen und einzeln annehmen")
+        self.offers_btn.clicked.connect(self._open_offer_inbox)
+        header.addWidget(self.offers_btn)
         self._refresh_sale_actions()
 
         self.status_badge = QLabel(player_status_label(self.player))
@@ -445,7 +451,7 @@ class PlayerDetailDialog(QDialog):
         )
         self.deals_card = MetricCard("LIGA-KAUFPREIS Ø", euro(deal_avg) if deal_avg is not None else "–", deal_hint)
         self.form_card = MetricCard("FORM · LETZTE 3", "–", "wird live geladen")
-        self.risk_card = MetricCard("KONSTANZ", "–", "letzte 5 Spiele")
+        self.risk_card = MetricCard("SCHWANKUNG", "–", "Std.-Abw. letzte 5")
 
         overview_cards = [
             self.market_card, self.entry_card, self.pnl_card, self.owner_card,
@@ -528,9 +534,40 @@ class PlayerDetailDialog(QDialog):
         chart_panel.setMaximumHeight(340)
         chart_panel.chart_view.setMinimumHeight(180)
         self.history_chart_view = chart_panel.chart_view
+        self.history_chart_view.setRubberBand(QChartView.RectangleRubberBand)
+        self.history_chart_view.setToolTip(
+            "Mit gedrückter linker Maustaste einen Bereich aufziehen, um hineinzuzoomen. "
+            "Die Zeitraum-Buttons setzen den sichtbaren Bereich direkt."
+        )
+
+        history_controls = QHBoxLayout()
+        history_controls.setSpacing(6)
+        history_label = QLabel("ZEITRAUM")
+        history_label.setObjectName("Tiny")
+        history_controls.addWidget(history_label)
+        for label, days in (("7T", 7), ("30T", 30), ("90T", 90), ("1J", 365)):
+            button = QPushButton(label)
+            button.setObjectName("CompactActionButton")
+            button.setMaximumWidth(52)
+            button.clicked.connect(lambda _checked=False, d=days: self._set_history_range(d))
+            history_controls.addWidget(button)
+        all_button = QPushButton("ALLES")
+        all_button.setObjectName("CompactActionButton")
+        all_button.clicked.connect(lambda: self._set_history_range(None))
+        reset_zoom = QPushButton("ZOOM RESET")
+        reset_zoom.setObjectName("CompactActionButton")
+        reset_zoom.clicked.connect(self._reset_history_zoom)
+        history_controls.addWidget(all_button)
+        history_controls.addWidget(reset_zoom)
+        history_controls.addStretch()
+        chart_panel.layout().insertLayout(2, history_controls)
+
         self._set_history_chart(self.history_chart_view)
         market_layout.addWidget(chart_panel, 1)
-        market_hint = QLabel("Der Verlauf verwendet echte gespeicherte Kickbase-Marktwerte; keine interpolierten Fantasiewerte.")
+        market_hint = QLabel(
+            "Der Verlauf verwendet echte gespeicherte Kickbase-Marktwerte; keine interpolierten Fantasiewerte. "
+            "Zoomen: Bereich mit der Maus aufziehen oder 7T/30T/90T/1J wählen."
+        )
         market_hint.setObjectName("Tiny")
         market_hint.setWordWrap(True)
         market_layout.addWidget(market_hint)
@@ -712,6 +749,25 @@ class PlayerDetailDialog(QDialog):
         listing = self._current_own_listing() if owned else None
         self.list_player_btn.setVisible(owned and listing is None)
         self.manage_listing_btn.setVisible(owned and listing is not None)
+        self.offers_btn.setVisible(owned and listing is not None)
+        if listing is not None:
+            manager_count = int(listing.get("offer_count") or len(listing.get("incoming_offers") or []) or 0)
+            kickbase_count = 1 if int(listing.get("market_value") or self.player.get("market_value") or 0) > 0 else 0
+            count = manager_count + kickbase_count
+            self.offers_btn.setText(f"ANGEBOTE {count}" if count else "ANGEBOTE")
+
+    def _open_offer_inbox(self) -> None:
+        if not self.league_id or self.client is None:
+            QMessageBox.warning(self, "Angebote", "Keine aktive Liga bzw. Kickbase-Verbindung verfügbar.")
+            return
+        listing = self._current_own_listing()
+        if listing is None:
+            QMessageBox.information(self, "Angebote", "Der Spieler ist aktuell nicht auf deiner Transferliste.")
+            return
+        OfferInboxDialog(
+            self, self.client, str(self.league_id), listing, refresh_callback=self._refresh_after_sale_write
+        ).exec()
+        self._refresh_sale_actions()
 
     def _open_listing_management(self) -> None:
         if not self.league_id or self.client is None:
@@ -923,7 +979,7 @@ class PlayerDetailDialog(QDialog):
             else:
                 self.form_card.value_label.setText("–")
                 self.form_card.hint_label.setText("noch keine aktuellen Spiele")
-            self.risk_card.value_label.setText(str(form.get("risk") or "–"))
+            self.risk_card.value_label.setText(f"{float(form.get('volatility')):.0f} P" if form.get("volatility") is not None else "–")
             vol = form.get("volatility")
             floor, ceiling = form.get("robust_floor", form.get("floor")), form.get("robust_ceiling", form.get("ceiling"))
             if vol is not None:
@@ -1203,6 +1259,51 @@ class PlayerDetailDialog(QDialog):
     def _match_event_finished(self) -> None:
         self._match_event_worker = None
 
+    def _reset_history_zoom(self) -> None:
+        if not hasattr(self, "history_chart_view"):
+            return
+        chart = self.history_chart_view.chart()
+        if chart is not None:
+            chart.zoomReset()
+        self._set_history_range(None)
+
+    def _set_history_range(self, days: int | None) -> None:
+        axis_x = getattr(self, "_history_axis_x", None)
+        axis_y = getattr(self, "_history_axis_y", None)
+        timestamps = list(getattr(self, "_history_timestamps", []) or [])
+        values = list(getattr(self, "_history_values", []) or [])
+        if axis_x is None or axis_y is None or not timestamps:
+            return
+
+        last_x = max(timestamps)
+        first_available = min(timestamps)
+        if days is None:
+            first_x = first_available
+        else:
+            first_x = max(first_available, last_x - int(days) * 24 * 60 * 60 * 1000)
+        if first_x == last_x:
+            first_x -= 12 * 60 * 60 * 1000
+            last_x += 12 * 60 * 60 * 1000
+        axis_x.setRange(QDateTime.fromMSecsSinceEpoch(first_x), QDateTime.fromMSecsSinceEpoch(last_x))
+
+        visible_values = [value for ts, value in zip(timestamps, values) if first_x <= ts <= last_x]
+        entry_value = self.player.get("entry_value")
+        if entry_value is not None:
+            visible_values.append(int(entry_value))
+        if not visible_values:
+            return
+        low = min(visible_values) / 1_000_000
+        high = max(visible_values) / 1_000_000
+        span = high - low
+        padding = max(0.05, span * 0.18, high * 0.0025)
+        axis_y.setRange(max(0, low - padding), high + padding)
+        if span < 0.10:
+            axis_y.setLabelFormat("%.3f M")
+        elif span < 1.0:
+            axis_y.setLabelFormat("%.2f M")
+        else:
+            axis_y.setLabelFormat("%.1f M")
+
     def _set_history_chart(self, view: QChartView) -> None:
         if not self.history:
             chart = QChart()
@@ -1306,6 +1407,11 @@ class PlayerDetailDialog(QDialog):
         if entry_value is not None:
             entry_series.attachAxis(axis_x)
             entry_series.attachAxis(axis_y)
+
+        self._history_axis_x = axis_x
+        self._history_axis_y = axis_y
+        self._history_timestamps = list(timestamps)
+        self._history_values = list(values)
 
         history_popover = chart_hover_popover(view)
 

@@ -5,6 +5,7 @@ import html
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from time import perf_counter
 from zoneinfo import ZoneInfo
 
 import keyring
@@ -77,13 +78,14 @@ from .ui_v4_components import (
     DashboardFocusPanel,
     FadeController,
     ManagerStatusStrip,
-    MarketScoreBar,
     PlayerAvatar,
     SquadPitchWidget,
     SquadBenchStrip,
     TradeCycleCard,
 )
 from .mv_prediction import build_predictions
+from .market_value_history import MarketValueHistoryService
+from .market_value_insights import apply_facts_first_market, build_reversal_reference, trend_display, trend_tone
 from .performance_chart import PerformanceMatchBarsWidget
 from .loading_skeleton import MarketDetailSkeletonOverlay, MarketTableSkeletonOverlay
 from .market_analysis import enrich_market_entries, financing_scenarios
@@ -92,9 +94,9 @@ from .bidding import calculate_bid_capacity
 from .selling import listing_price_for_percent
 from .squad_analysis import enrich_squad_entries
 from .coach_analysis import build_coach_recommendations
-from .portfolio_analysis import analyze_portfolio
+from .portfolio_analysis import next_solvency_deadline
 from .transfer_evaluation import evaluate_trade_cycles, transfer_evaluation_summary
-from .preseason_tools import add_value_scores, optimize_starting_squad
+from .preseason_tools import optimize_starting_squad
 from .squad_rules import MAX_SQUAD_SIZE, active_bid_count, squad_capacity
 from .player_master import sync_player_master, sync_missing_portraits, cache_review_candidate
 from .league_learning import (
@@ -112,6 +114,8 @@ from .ui_components import (
     ClubItemDelegate,
     CompactMetric,
     MUTED,
+    MarketTrendIconDelegate,
+    MarketTrendLegend,
     POSITION_SORT,
     RED,
     RecommendationChipDelegate,
@@ -164,7 +168,7 @@ class MarketMixin:
         self.market_position.addItems(["Alle Positionen", "TW", "ABW", "MF", "ST"])
         self.market_position.currentIndexChanged.connect(self._apply_market_filters)
         self.market_verdict = QComboBox()
-        self.market_verdict.addItems(["Alle Aktionen", "KADERZIEL", "INVEST", "BEOBACHTEN", "PASS"])
+        self.market_verdict.addItems(["Alle Signale", "INTERESSANT", "BEOBACHTEN", "ABKÜHLEND", "TREND DREHT", "MEIDEN", "KEINE KLARE EMPFEHLUNG"])
         self.market_verdict.currentIndexChanged.connect(self._apply_market_filters)
         self.market_affordable = QCheckBox("Nur bezahlbar")
         self.market_affordable.stateChanged.connect(self._apply_market_filters)
@@ -198,7 +202,7 @@ class MarketMixin:
         summary.setSpacing(4)
         self.market_count_card = CompactMetric("SPIELER", "–", "aktuell sichtbar", accent="orange")
         self.market_under_card = CompactMetric("UNTER MW", "–", "Preis < Marktwert", accent="green")
-        self.market_interest_card = CompactMetric("CHANCEN", "–", "Kaderziele + Investments", accent="purple")
+        self.market_interest_card = CompactMetric("SIGNALE", "–", "faktenbasierte Markt-Hinweise", accent="purple")
         self.market_budget_card = CompactMetric("FREIES BUDGET", "–", "nach aktiven Geboten", accent="gold")
         self.market_model_card = CompactMetric("22U MODELL", "–", "noch keine Auswertung", accent="blue")
         self.market_cards = [self.market_count_card, self.market_under_card, self.market_interest_card, self.market_budget_card, self.market_model_card]
@@ -235,6 +239,8 @@ class MarketMixin:
         header.addWidget(self.market_optimizer_btn)
         header.addWidget(self.market_finance_btn)
         layout.addLayout(header)
+        self.market_trend_legend = MarketTrendLegend()
+        layout.addWidget(self.market_trend_legend)
 
         # Master/detail layout: the table is for scanning; the right panel
         # explains the selected player without hiding decision-critical data
@@ -244,13 +250,14 @@ class MarketMixin:
         # twelfth column made the master table unreadable at normal desktop
         # widths and caused clipped headers after the V6 splitter refactor.
         self.market_table = self._make_table(
-            ["SPIELER", "VEREIN", "POS", "ANBIETER", "MW", "24H", "22U", "PREIS", "DEIN GEBOT", "VALUE", "ABLAUF"],
-            [220, 112, 54, 116, 100, 72, 76, 96, 108, 72, 92],
+            ["SPIELER", "VEREIN", "POS", "ANBIETER", "MW", "24H", "22U", "PREIS", "DEIN GEBOT", "DYNAMIK", "ABLAUF", "AKTION"],
+            [210, 108, 52, 108, 96, 68, 72, 92, 102, 78, 88, 78],
         )
         self.market_table.setItemDelegateForColumn(1, ClubItemDelegate(self.market_table))
+        self.market_table.setItemDelegateForColumn(9, MarketTrendIconDelegate(self.market_table))
         self.market_table.set_responsive_widths(
-            [220, 112, 54, 116, 100, 72, 76, 96, 108, 72, 92],
-            [188, 94, 50, 96, 92, 62, 64, 86, 94, 62, 82],
+            [210, 108, 52, 108, 96, 68, 72, 92, 102, 78, 88, 78],
+            [180, 90, 48, 90, 88, 60, 62, 82, 90, 72, 78, 72],
         )
         self.market_table.verticalHeader().setDefaultSectionSize(50)
         self.market_countdown_timer = QTimer(self)
@@ -265,7 +272,9 @@ class MarketMixin:
         self._market_selected_player_data = None
         self._market_rows_by_id: dict[str, dict] = {}
         self.market_table.cellClicked.connect(self._market_row_clicked)
-        self.market_table.itemSelectionChanged.connect(self._market_selection_changed)
+        # The persistent detail pane is click-authoritative. Selection/current-item
+        # changes can happen as a side effect of focus, sorting or mouse movement
+        # on some Qt/Windows combinations and must never replace the chosen player.
         self.market_table.itemDoubleClicked.connect(self._open_market_player_detail)
 
         self.market_detail_panel = QFrame()
@@ -321,8 +330,8 @@ class MarketMixin:
             ("MARKTWERT", self.market_detail_mv),
             ("PREIS", self.market_detail_price),
             ("DEIN GEBOT", self.market_detail_own_bid),
-            ("MAX-BID", self.market_detail_max),
-            ("LIGA-TYPISCH", self.market_detail_liga),
+            ("PREIS Δ MW", self.market_detail_max),
+            ("LIGATYP. PREIS", self.market_detail_liga),
         ]):
             key = QLabel(title_text)
             key.setObjectName("Tiny")
@@ -330,16 +339,13 @@ class MarketMixin:
             money_layout.addWidget(value_label, row, 1, Qt.AlignRight)
         detail.addWidget(money)
 
-        self.market_detail_scores = QLabel("STARTKADER –   ·   TRADE –")
+        self.market_detail_scores = QLabel("MW-DYNAMIK –")
         self.market_detail_scores.setObjectName("MarketDetailScores")
-        self.market_detail_scores.setVisible(False)
         detail.addWidget(self.market_detail_scores)
-        self.market_score_fit = MarketScoreBar("STARTKADER")
-        self.market_score_trade = MarketScoreBar("TRADE")
-        self.market_score_value = MarketScoreBar("VALUE")
-        detail.addWidget(self.market_score_fit)
-        detail.addWidget(self.market_score_trade)
-        detail.addWidget(self.market_score_value)
+        self.market_detail_reversal = QLabel("WENDE-PROGNOSE · –")
+        self.market_detail_reversal.setObjectName("Subtle")
+        self.market_detail_reversal.setWordWrap(True)
+        detail.addWidget(self.market_detail_reversal)
         self.market_detail_trend = QLabel("24H –   ·   22U –   ·   3T –   ·   7T –")
         self.market_detail_trend.setObjectName("Subtle")
         detail.addWidget(self.market_detail_trend)
@@ -553,6 +559,11 @@ class MarketMixin:
         league_id = str(league_id) if league_id else self.storage.get_setting("league_id")
         if not league_id or any((self._market_worker, self._market_enrichment_worker, self._market_status_worker)):
             return
+        if not getattr(self, "_league_learning", None) and hasattr(self, "_load_league_learning"):
+            try:
+                QTimer.singleShot(0, lambda: self._load_league_learning(force=False))
+            except Exception:
+                pass
         manager_id = self.storage.get_league_setting(league_id, "manager_id") or self.storage.get_setting("manager_id")
         owned_player_ids = {str(p.get("player_id")) for p in self.storage.current_players() if p.get("player_id") is not None}
 
@@ -587,6 +598,17 @@ class MarketMixin:
         worker.signals.finished.connect(self._market_overview_finished)
         QThreadPool.globalInstance().start(worker)
 
+    def _clear_market_table_widgets(self) -> None:
+        if not hasattr(self, "market_table"):
+            return
+        table = self.market_table
+        for row in range(table.rowCount()):
+            for column in range(table.columnCount()):
+                widget = table.cellWidget(row, column)
+                if widget is not None:
+                    table.removeCellWidget(row, column)
+                    widget.deleteLater()
+
     def _show_market_skeleton(self, row_count: int = 9) -> None:
         """Show a modern animated shimmer while all market workers finish.
 
@@ -598,10 +620,16 @@ class MarketMixin:
             return
 
         table = self.market_table
+        QToolTip.hideText()
+        table.setEnabled(False)
         table.setSortingEnabled(False)
+        table.clearSelection()
+        self._clear_market_table_widgets()
         table.clearContents()
         table.setRowCount(0)
-        table.setSortingEnabled(True)
+        self._market_rows_by_id = {}
+        self._market_selected_player_id = None
+        self._market_selected_player_data = None
 
         skeleton = getattr(self, "_market_table_skeleton", None)
         if skeleton is None:
@@ -784,19 +812,20 @@ class MarketMixin:
             row.setdefault("price_delta", price - market_value if price and market_value else 0)
             row.setdefault("affordable", bool(price and price <= available))
 
-        # Keep the skeleton visible until both analytical enrichment and canonical
-        # status enrichment have finished. The network result is staged here, but
-        # never painted as a half-complete table.
+        # Keep the skeleton visible until the market is genuinely complete. The
+        # base payload is retained in memory immediately, but we deliberately do
+        # not expose half-filled rows (missing 24h/history/predictions) as if they
+        # were final data. All expensive work remains outside the GUI thread.
         self._market_pending_base_rows = market_entries
         self._market_budget = available
         self.market_count_card.value_label.setText("…")
         self.market_under_card.value_label.setText("…")
         self.market_interest_card.value_label.setText("…")
-        self.market_interest_card.hint_label.setText("Marktdaten werden vollständig vorbereitet …")
+        self.market_interest_card.hint_label.setText("Status, MW-Historie & Prognosen werden geladen …")
         self.market_budget_card.value_label.setText(euro(available))
         capacity = squad_capacity(self._player_metrics())
         self.market_budget_card.hint_label.setText(f"nach Geboten · Kader {capacity.current}/{capacity.maximum}")
-        self.market_status.setText(f"{len(market_entries)} Spieler gefunden · Analyse & Status werden geladen …")
+        self.market_status.setText(f"{len(market_entries)} Spieler gefunden · Analyse wird vervollständigt …")
 
         # Status and analytical enrichment are independent and run concurrently.
         self._start_market_status_enrichment(league_id, generation, market_entries)
@@ -812,33 +841,92 @@ class MarketMixin:
         season_started = self._season_mode_active()
 
         def enrich_market_background():
+            started = perf_counter()
+            marks: dict[str, float] = {}
             rows_in = [dict(row) for row in market_entries]
+            market_ids = list(dict.fromkeys(
+                str(row.get("player_id")) for row in rows_in if row.get("player_id")
+            ))
 
-            # Persist/merge market-value analytics away from the GUI thread.
+            # The two expensive network fan-outs are independent: exact 24h
+            # player details and 365-day MW histories. Run them concurrently so
+            # their latencies overlap instead of adding up. The GUI still keeps
+            # the skeleton up until both branches and the analysis are complete.
+            missing_daily = [
+                str(row.get("player_id")) for row in rows_in
+                if row.get("player_id") and row.get("d1") is None and row.get("daily_change") is None
+            ]
+            today_key = datetime.now(ZoneInfo("Europe/Berlin")).date().isoformat()
+            daily_cache_key = f"market:daily_changes:{league_id}:{today_key}"
+            cached_daily = self.storage.cache_get(daily_cache_key, 26 * 3600)
+            exact_daily = dict(cached_daily) if isinstance(cached_daily, dict) else {}
+            need_daily_api = [pid for pid in missing_daily if pid not in exact_daily]
+
+            # Write today's live values before the history service inspects local
+            # coverage. These writes are tiny and happen in one background worker.
             for row in rows_in:
                 player_id = row.get("player_id")
                 market_value = row.get("market_value")
                 if player_id and market_value:
                     try:
                         self.storage.snapshot_market_value(str(player_id), int(market_value))
-                        api_d1 = row.get("d1") if row.get("d1") is not None else row.get("daily_change")
-                        analytics = self.storage.analytics(str(player_id))
-                        row.update(analytics)
-                        if row.get("d1") is None and api_d1 is not None:
-                            row["d1"] = int(api_d1)
-                            row["daily_change"] = int(api_d1)
                     except Exception:
                         pass
+            marks["snapshots"] = perf_counter()
 
-            try:
-                self.storage.evaluate_mv_predictions(
-                    str(league_id), through_date=self._mv_prediction_evaluation_through()
+            history_coverage = {"players": 0, "fresh_players": 0, "useful_players": 0, "fetched_players": 0}
+            histories: dict[str, list[dict]] = {}
+            history_service = MarketValueHistoryService(
+                self.client, self.storage, str(league_id), timeframe=365, max_workers=8
+            )
+
+            with ThreadPoolExecutor(max_workers=2) as fanout_pool:
+                daily_future = (
+                    fanout_pool.submit(self.client.market_daily_changes, str(league_id), need_daily_api)
+                    if need_daily_api else None
                 )
-            except Exception:
-                pass
+                history_future = fanout_pool.submit(history_service.ensure_many, market_ids)
+
+                # Prediction evaluation is local DB work and can be done while the
+                # API requests are in flight without blocking the GUI thread.
+                try:
+                    self.storage.evaluate_mv_predictions(
+                        str(league_id), through_date=self._mv_prediction_evaluation_through()
+                    )
+                except Exception:
+                    pass
+
+                try:
+                    history_result = history_future.result()
+                except Exception:
+                    history_result = {"histories": {}, "players": len(market_ids)}
+                histories = history_result.get("histories") or {}
+                history_coverage = {
+                    key: history_result.get(key, 0)
+                    for key in ("players", "fresh_players", "useful_players", "fetched_players")
+                }
+                marks["history"] = perf_counter()
+
+                if daily_future is not None:
+                    try:
+                        fetched_daily = daily_future.result()
+                    except Exception:
+                        fetched_daily = {}
+                    exact_daily.update({str(pid): value for pid, value in (fetched_daily or {}).items()})
+                    try:
+                        self.storage.cache_set(daily_cache_key, exact_daily)
+                    except Exception:
+                        pass
+                marks["daily"] = perf_counter()
+
+            # Merge authoritative live 24h changes after the parallel fan-out.
+            for row in rows_in:
+                pid = str(row.get("player_id") or "")
+                if pid and pid in exact_daily and exact_daily.get(pid) is not None:
+                    row["d1"] = int(exact_daily[pid])
+                    row["daily_change"] = int(exact_daily[pid])
 
             try:
-                history_rows = self.storage.all_market_value_rows()
                 current_values: dict[str, int] = {}
                 current_deltas: dict[str, int] = {}
                 prediction_sources: dict[str, str] = {}
@@ -853,6 +941,11 @@ class MarketMixin:
                     if row.get("d1") is not None:
                         current_deltas[pid] = int(row.get("d1") or 0)
 
+                # Keep the wider 22U tracking pool, but do not make the visible
+                # market wait for fresh 365-day API downloads of off-screen squad
+                # players. build_predictions only emits a forecast when a real
+                # stored timeline exists; missing history therefore degrades to no
+                # prediction rather than to an invented value.
                 for row in self.storage.current_players():
                     pid = str(row.get("player_id") or "")
                     mv = row.get("market_value")
@@ -878,6 +971,23 @@ class MarketMixin:
                     if analytics.get("d1") is not None:
                         current_deltas[pid] = int(analytics.get("d1") or 0)
 
+                # Re-read derived 1/3/7-day facts after real API history was
+                # persisted. Preserve Kickbase's live 24h field when present.
+                for row in rows_in:
+                    pid = str(row.get("player_id") or "")
+                    if not pid:
+                        continue
+                    live_d1 = row.get("d1") if row.get("d1") is not None else row.get("daily_change")
+                    row.update(self.storage.analytics(pid))
+                    if live_d1 is not None:
+                        row["d1"] = int(live_d1)
+                        row["daily_change"] = int(live_d1)
+                marks["analytics"] = perf_counter()
+
+                history_rows = self.storage.all_market_value_rows()
+                marks["history_rows"] = perf_counter()
+                reversal_reference = build_reversal_reference(history_rows)
+                marks["reversal_ref"] = perf_counter()
                 prediction_target = self._mv_prediction_target_date()
                 predictions = build_predictions(
                     history_rows,
@@ -885,6 +995,7 @@ class MarketMixin:
                     current_deltas=current_deltas,
                     target_date=prediction_target,
                 )
+                marks["22u"] = perf_counter()
                 for row in rows_in:
                     pred = predictions.get(str(row.get("player_id")))
                     if pred:
@@ -898,7 +1009,11 @@ class MarketMixin:
                     sources=prediction_sources,
                 )
             except Exception:
-                pass
+                history_rows = self.storage.all_market_value_rows()
+                reversal_reference = build_reversal_reference(history_rows)
+                for row in rows_in:
+                    pid = str(row.get("player_id") or "")
+                    histories[pid] = self.storage.all_history(pid) if pid else []
 
             league_transfers = self.storage.league_all_manager_transfer_rows(
                 str(league_id), since=current_season_start().isoformat()
@@ -911,35 +1026,38 @@ class MarketMixin:
                 league_transfers=league_transfers,
             )
 
-            try:
-                squad_rows = enrich_squad_entries(
-                    self._player_metrics(),
-                    points_are_current=points_are_current,
-                    market_rows=rows,
-                    available_budget=available,
-                )
-                rows, _portfolio_squad, portfolio_summary = analyze_portfolio(
-                    rows,
-                    squad_rows,
-                    available_budget=cash_balance,
-                    season_started=season_started,
-                    committed_budget=committed,
-                )
-            except Exception:
-                portfolio_summary = {}
+            portfolio_summary = {
+                "deadline": next_solvency_deadline(season_started=season_started),
+                "balance_after_commitments": available,
+                "projected_balance_before_new_buys": available,
+            }
 
-            rows = add_value_scores(rows)
-            try:
-                self.storage.record_market_decisions(str(league_id), rows)
-                backtest = self.storage.decision_backtest_summary(str(league_id))
-            except Exception:
-                backtest = {"evaluated": 0, "hit_rate": None}
+            rows = apply_facts_first_market(
+                rows, histories, history_rows, reversal_reference=reversal_reference
+            )
+            marks["facts_first"] = perf_counter()
+            backtest = {"evaluated": 0, "hit_rate": None}
+
+            # Lightweight timing log for real installations. If a future API or
+            # DB regression pushes the load back above five seconds, the dominant
+            # stage is immediately visible instead of requiring guesswork.
+            previous = started
+            parts = []
+            for label in ("snapshots", "history", "daily", "analytics", "history_rows", "reversal_ref", "22u", "facts_first"):
+                stamp = marks.get(label)
+                if stamp is not None:
+                    parts.append(f"{label}={stamp - previous:.3f}s")
+                    previous = stamp
+            parts.append(f"total={perf_counter() - started:.3f}s")
+            print("[PERF] market enrichment " + " ".join(parts))
 
             return {
                 "rows": rows,
                 "portfolio_summary": portfolio_summary,
                 "backtest": backtest,
                 "points_are_current": points_are_current,
+                "history_coverage": history_coverage,
+                "reversal_reference": reversal_reference,
             }
 
         worker = FunctionWorker(enrich_market_background)
@@ -990,33 +1108,35 @@ class MarketMixin:
                 row["status_list"] = canonical.get("status_list") or []
 
         self._market_rows = rows
+        self._reversal_reference_cache = list(enrichment.get("reversal_reference") or [])
+        # Kader/Dashboard/Coach may use the freshly enriched market context; mark
+        # them stale but do not recompute them until the user actually opens them.
+        if hasattr(self, "_invalidate_page_cache"):
+            self._invalidate_page_cache(0, 1, 6)
         self._portfolio_summary = enrichment.get("portfolio_summary") or {}
         self._market_backtest = enrichment.get("backtest") or {"evaluated": 0, "hit_rate": None}
 
         self.market_count_card.value_label.setText(str(len(rows)))
         self.market_under_card.value_label.setText(str(sum(1 for r in rows if (r.get("price_delta") or 0) < 0)))
         self.market_interest_card.value_label.setText(
-            str(sum(1 for r in rows if r.get("action") in {"KADERZIEL", "INVEST", "BEOBACHTEN"}))
+            str(sum(1 for r in rows if r.get("action") in {"INTERESSANT", "BEOBACHTEN", "ABKÜHLEND", "TREND DREHT"}))
         )
-        backtest = self._market_backtest
-        hit_rate = backtest.get("hit_rate")
-        spread = backtest.get("return_spread_7d")
-        evaluated = int(backtest.get("evaluated") or 0)
-        if spread is not None and evaluated >= 5:
-            self.market_interest_card.hint_label.setText(f"7T BUY-vs-PASS Spread {spread:+.1f} pp · n={evaluated}")
-        elif hit_rate is not None and evaluated >= 5:
-            self.market_interest_card.hint_label.setText(f"7T-Modellcheck {hit_rate:.0f}% · n={evaluated}")
-        elif enrichment.get("points_are_current") is False:
-            self.market_interest_card.hint_label.setText("Preseason · Modell lernt mit Historie")
-        elif enrichment:
-            self.market_interest_card.hint_label.setText("Entscheidungen werden für Backtests gespeichert")
+        coverage = enrichment.get("history_coverage") or {}
+        useful = int(coverage.get("useful_players") or 0)
+        total_history = int(coverage.get("players") or 0)
+        fetched = int(coverage.get("fetched_players") or 0)
+        if total_history:
+            self.market_interest_card.hint_label.setText(
+                f"MW-Historie {useful}/{total_history} nutzbar" + (f" · {fetched} aktualisiert" if fetched else "")
+            )
         else:
-            self.market_interest_card.hint_label.setText("Basisdaten geladen · Analyse derzeit nicht verfügbar")
+            self.market_interest_card.hint_label.setText("Faktenbasierte Signale aus MW-Verlauf")
 
         league_id = str(self.league_combo.currentData() or self.storage.get_setting("league_id") or "")
         if league_id:
             self._refresh_mv_model_quality(league_id)
         self._apply_market_filters()
+        self.market_table.setEnabled(True)
         if getattr(self, "_market_table_skeleton", None) is not None:
             self._market_table_skeleton.stop(animated=True)
         if getattr(self, "_market_detail_skeleton", None) is not None:
@@ -1056,6 +1176,9 @@ class MarketMixin:
     def _market_overview_failed(self, message: str) -> None:
         self.market_status.setText("Transfermarkt konnte nicht geladen werden")
         self.statusBar().showMessage("Markt: " + message.splitlines()[0], 7000)
+        QToolTip.hideText()
+        self.market_table.setEnabled(True)
+        self._clear_market_table_widgets()
         self.market_table.clearContents()
         self.market_table.setRowCount(0)
         if getattr(self, "_market_table_skeleton", None) is not None:
@@ -1191,6 +1314,9 @@ class MarketMixin:
             if player.get("player_id") is not None
         }
         table.setSortingEnabled(False)
+        QToolTip.hideText()
+        self._clear_market_table_widgets()
+        table.clearContents()
         table.setRowCount(len(rows))
         for r, player in enumerate(rows):
             full_name = str(player.get("full_name") or player.get("name") or "–")
@@ -1205,8 +1331,9 @@ class MarketMixin:
                 (delta_text(player.get("next_refresh_delta"), compact=True), int(player.get("next_refresh_delta") or 0), None),
                 (euro(player.get("price")), int(player.get("price") or 0), None),
                 (euro(player.get("own_bid")) if player.get("own_bid") else "–", int(player.get("own_bid") or 0), None),
-                (str(player.get("value_score")) if player.get("value_score") is not None else "–", int(player.get("value_score") or -1), None),
+                ("", str((player.get("mv_trend") or {}).get("code") or ""), None),
                 (self._format_market_expiry(player.get("expires_at"))[0], self._market_expiry_sort(player.get("expires_at")), None),
+                ("", 0, None),
             ]
             for c, (display, sort_value, icon) in enumerate(values):
                 item = table_item("" if c == 0 else display, sort_value, icon=icon)
@@ -1245,19 +1372,42 @@ class MarketMixin:
                             details.append(f"Zum aktuellen MW: {delta_text(delta)} ({premium:+.1f} %)" if premium is not None else f"Zum aktuellen MW: {delta_text(delta)}")
                         max_bid = int(player.get("max_bid") or 0)
                         if max_bid:
-                            details.append(f"Modell-Max-Bid: {euro(max_bid)}")
+                            details.append(f"Interne Preisgrenze: {euro(max_bid)}")
                         item.setToolTip("\n".join(details))
                     else:
                         item.setForeground(MUTED)
                         item.setToolTip("Auf diesem Spieler wurde kein eigenes aktives Gebot erkannt.")
                 elif c == 9:
-                    score = player.get("value_score")
-                    if score is not None:
-                        item.setToolTip(str(player.get("value_reason") or "Relative Preis-Leistung im Positionsvergleich."))
-                        if int(score) >= 80:
-                            item.setForeground(QColor("#62E49A"))
-                        elif int(score) < 45:
-                            item.setForeground(QColor("#FF7A80"))
+                    trend = player.get("mv_trend") or {}
+                    reversal = player.get("trend_reversal_prediction") or {}
+                    item.setData(Qt.UserRole + 2, str(trend.get("code") or "UNKNOWN"))
+                    tone = trend_tone(trend.get("code"))
+                    if tone == "positive":
+                        item.setForeground(QColor("#38D98A"))
+                    elif tone == "warning":
+                        item.setForeground(QColor("#F3A847"))
+                    elif tone == "negative":
+                        item.setForeground(QColor("#FF5A5F"))
+                    else:
+                        item.setForeground(MUTED)
+                    lines = [str(trend.get("reason") or "Noch keine belastbare MW-Dynamik.")]
+                    if trend.get("steps_text"):
+                        lines.append(f"Letzte Schritte: {trend.get('steps_text')}")
+                    if reversal.get("probability") is not None:
+                        lines.append(
+                            f"Wende-Prognose: {reversal.get('risk')} · {float(reversal.get('probability'))*100:.0f}% · "
+                            f"n={int(reversal.get('sample_count') or 0)} · Horizont {int(reversal.get('horizon_refreshes') or 2)} Refreshes"
+                        )
+                    elif reversal.get("reason"):
+                        lines.append(str(reversal.get("reason")))
+                    item.setToolTip("\n".join(lines))
+                    code = str(trend.get("code") or "")
+                    if code in {"ACCELERATING_UP", "STABLE_UP"}:
+                        item.setForeground(QColor("#62E49A"))
+                    elif code in {"ACCELERATING_DOWN", "STABLE_DOWN", "TURNING_DOWN"}:
+                        item.setForeground(QColor("#FF7A80"))
+                    elif code in {"SLOWING_UP", "RECOVERING", "TURNING_UP"}:
+                        item.setForeground(QColor("#F3C44E"))
                 elif c == 10:
                     _display, expiry_tip = self._format_market_expiry(player.get("expires_at"))
                     item.setToolTip(expiry_tip)
@@ -1268,6 +1418,12 @@ class MarketMixin:
                 if c == 0:
                     portrait_path = self.storage.portrait_path(str(player.get("player_id") or ""))
                     table.setCellWidget(r, c, player_name_cell(player, portrait_path, full_name))
+                elif c == 11:
+                    bid_btn = QPushButton("BIETEN")
+                    bid_btn.setObjectName("CompactActionButton")
+                    bid_btn.setToolTip("Gebot für diesen Spieler öffnen")
+                    bid_btn.clicked.connect(lambda _checked=False, p=dict(player): self._open_market_bid_for_player(p))
+                    table.setCellWidget(r, c, bid_btn)
         table.setSortingEnabled(True)
         table.fit_columns_to_viewport()
 
@@ -1332,22 +1488,6 @@ class MarketMixin:
                 self._market_selected_player_data = mapped
                 return mapped
         return None
-
-    def _market_selection_changed(self) -> None:
-        """Support keyboard selection without competing with mouse clicks."""
-        row = self.market_table.currentRow()
-        if row < 0:
-            return
-        source = self.market_table.item(row, 0)
-        if source is None:
-            return
-        player = source.data(Qt.UserRole + 1)
-        if not isinstance(player, dict):
-            return
-        player_id = str(player.get("player_id") or source.data(Qt.UserRole) or "")
-        self._market_selected_player_id = player_id or None
-        self._market_selected_player_data = player
-        self._render_market_detail(player)
 
     def _render_market_detail(self, player: dict | None) -> None:
         selected = player if isinstance(player, dict) else None
@@ -1431,22 +1571,20 @@ class MarketMixin:
             self.market_detail_meta.setText("Wähle links einen Spieler für die Entscheidungsansicht.")
             self.market_detail_portrait.set_player("?")
             self.market_detail_clubline.setText("")
-            self.market_score_fit.set_score(None)
-            self.market_score_trade.set_score(None)
-            self.market_score_value.set_score(None)
+            self.market_detail_scores.setText("MW-DYNAMIK –")
+            self.market_detail_reversal.setText("WENDE-PROGNOSE · –")
             self.market_detail_mv.setText("–")
             self.market_detail_price.setText("–")
             self.market_detail_own_bid.setText("–")
             self.market_detail_own_bid.setToolTip("")
             self.market_detail_max.setText("–")
             self.market_detail_liga.setText("–")
-            self.market_detail_scores.setText("STARTKADER –   ·   TRADE –")
             self.market_detail_trend.setText("24H –   ·   22U –   ·   3T –   ·   7T –")
             self.market_detail_reason.setText(self._format_market_reason_text([]))
             self.market_detail_history.setText(self._format_market_history_empty())
             return
 
-        signal = str(player.get("portfolio_role") or player.get("signal") or "BEOBACHTEN")
+        signal = str(player.get("facts_signal") or player.get("signal") or "KEINE KLARE EMPFEHLUNG")
         self.market_detail_signal.setText(signal)
         display_name = str(player.get("full_name") or player.get("name") or "Spieler")
         self.market_detail_name.setText(display_name)
@@ -1473,29 +1611,67 @@ class MarketMixin:
         else:
             self.market_detail_own_bid.setText("–")
             self.market_detail_own_bid.setToolTip("Kein eigenes aktives Gebot erkannt")
-        self.market_detail_max.setText(euro(player.get("max_bid")) if player.get("max_bid") else "–")
-
-        winning = estimate_winning_price(player.get("market_value"), getattr(self, "_league_learning", {}) or {})
-        self.market_detail_liga.setText(euro(winning.get("price")) if winning.get("price") else "–")
-        if winning.get("price"):
-            self.market_detail_liga.setToolTip(f"{winning.get('source')} · {winning.get('premium_pct'):+.1f}% · n={winning.get('sample_count', 0)}")
+        market_value = int(player.get("market_value") or 0)
+        price_value = int(player.get("price") or 0)
+        if market_value > 0 and price_value > 0:
+            price_delta = price_value - market_value
+            price_delta_pct = price_delta / market_value * 100.0
+            self.market_detail_max.setText(f"{delta_text(price_delta)} · {price_delta_pct:+.1f}%")
+            self.market_detail_max.setToolTip("Differenz des aktuellen Angebotspreises zum aktuellen Marktwert.")
         else:
-            self.market_detail_liga.setToolTip("Noch zu wenig historische Liga-Daten")
+            self.market_detail_max.setText("–")
+            self.market_detail_max.setToolTip("Preisvergleich nicht verfügbar.")
 
-        trading = int(player.get("investment_score") or 0)
-        fit = int(player.get("squad_fit_score") or 0)
-        value_score = player.get("value_score")
-        value_text = str(int(value_score)) if value_score is not None else "–"
-        self.market_detail_scores.setText(
-            f"STARTKADER {self._score_label(fit)}   ·   TRADE {self._score_label(trading)}   ·   VALUE {value_text}"
+        deal_median = player.get("league_deal_median")
+        deal_count = int(player.get("league_deal_count") or 0)
+        winning_context = estimate_winning_price(
+            player.get("market_value"), getattr(self, "_league_learning", {}) or {}, min_samples=3
         )
-        self.market_score_fit.set_score(fit)
-        self.market_score_trade.set_score(trading)
-        self.market_score_value.set_score(value_score)
-        self.market_detail_scores.setToolTip(
-            f"Startkader {fit}/100 · Trade {trading}/100 · Value {value_text}/100\n"
-            f"{player.get('value_reason') or 'Value ist eine relative Preis-Leistungs-Einordnung innerhalb der Position.'}"
-        )
+        typical_price = int(winning_context.get("price") or 0)
+        typical_premium = winning_context.get("premium_pct")
+        typical_count = int(winning_context.get("sample_count") or 0)
+        typical_source = str(winning_context.get("source") or "")
+        if typical_price > 0:
+            self.market_detail_liga.setText(euro(typical_price))
+            tip_lines = [
+                f"Ligatypischer Zielpreis aus historischen Overpays/Premiums dieser Liga.",
+                f"Basis: {typical_source} · n={typical_count}",
+            ]
+            if typical_premium is not None:
+                tip_lines.append(f"Median-Premium zum aktuellen MW: {float(typical_premium):+.1f}%")
+            if deal_median and deal_count:
+                tip_lines.append(f"Spielerbezogener Deal-Median: {euro(deal_median)} · n={deal_count}")
+            self.market_detail_liga.setToolTip("\n".join(tip_lines))
+        elif deal_median and deal_count:
+            self.market_detail_liga.setText(euro(deal_median))
+            self.market_detail_liga.setToolTip(
+                f"Median aus {deal_count} tatsächlich beobachteten Liga-Deals dieses Spielers.\n"
+                "Kein ligatypischer Premium-Preis verfügbar, daher Fallback auf den Spieler-Median."
+            )
+        else:
+            self.market_detail_liga.setText("–")
+            self.market_detail_liga.setToolTip(
+                "Noch zu wenig historische Liga-Käufe, um einen ligatypischen Preis abzuleiten."
+            )
+
+        trend_info = player.get("mv_trend") or {}
+        reversal = player.get("trend_reversal_prediction") or {}
+        self.market_detail_scores.setText(f"MW-DYNAMIK · {trend_display(trend_info)}")
+        trend_tip = str(trend_info.get("reason") or "Noch zu wenig echte Marktwert-Historie.")
+        if trend_info.get("steps_text"):
+            trend_tip += f"\nLetzte Schritte: {trend_info.get('steps_text')}"
+        self.market_detail_scores.setToolTip(trend_tip)
+        if reversal.get("probability") is not None:
+            self.market_detail_reversal.setText(
+                f"WENDE-PROGNOSE · {reversal.get('risk')} · {float(reversal.get('probability'))*100:.0f}%"
+            )
+            self.market_detail_reversal.setToolTip(
+                f"Prognose für die nächsten {int(reversal.get('horizon_refreshes') or 2)} Refreshes · "
+                f"n={int(reversal.get('sample_count') or 0)} historische Vergleichsfälle\n{reversal.get('reason') or ''}"
+            )
+        else:
+            self.market_detail_reversal.setText("WENDE-PROGNOSE · UNSICHER")
+            self.market_detail_reversal.setToolTip(str(reversal.get("reason") or "Noch zu wenig Daten."))
         pred = player.get("next_refresh_prediction") or {}
         pred_text = delta_text(pred.get("delta"), compact=True) if pred.get("delta") is not None else "–"
         self.market_detail_trend.setText(
@@ -1510,7 +1686,6 @@ class MarketMixin:
         else:
             self.market_detail_trend.setToolTip("Noch zu wenig tägliche Historie für 22U.")
         reasons = [str(x).strip() for x in (player.get("analysis_reasons") or []) if str(x).strip()]
-        max_reasons = [str(x).strip() for x in (player.get("max_bid_reasons") or []) if str(x).strip()]
         block = str(player.get("portfolio_block_reason") or "").strip()
         visible = []
         capacity = squad_capacity(self._player_metrics())
@@ -1520,7 +1695,7 @@ class MarketMixin:
             visible.append(f"Kader {capacity.current}/{capacity.maximum}: nur noch 1 freier Platz")
         if block:
             visible.append("⚠ " + block)
-        for text in reasons + max_reasons:
+        for text in reasons:
             if text and text not in visible:
                 visible.append(text)
             if len(visible) >= 3:
@@ -1547,6 +1722,14 @@ class MarketMixin:
 
     def _open_market_scoring_info(self) -> None:
         MarketScoringInfoDialog(self).exec()
+
+    def _open_market_bid_for_player(self, player: dict) -> None:
+        if not isinstance(player, dict) or not player.get("player_id"):
+            return
+        self._market_selected_player_id = str(player.get("player_id"))
+        self._market_selected_player_data = player
+        self._render_market_detail(player)
+        self._open_market_bid()
 
     def _open_market_bid(self) -> None:
         player = self._selected_market_player()

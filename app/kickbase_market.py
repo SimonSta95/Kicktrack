@@ -140,6 +140,13 @@ class KickbaseMarketMixin:
                 player["listing_price"] = listing_price
                 player["minimum_bid"] = current_mv if current_mv > 0 else listing_price
                 player["effective_sale_value"] = effective_sale_value
+                # Own market entries expose incoming manager bids in ``ofs``.
+                # Keep them attached to the listing so the UI can show a fast
+                # offer count without issuing another request. The offer modal
+                # still refreshes the targeted player state before a write.
+                incoming = self.normalize_incoming_offers({"ofs": self._offer_items(item)})
+                player["incoming_offers"] = incoming
+                player["offer_count"] = int(item.get("ofc") or len(incoming) or 0)
                 own_listings.append(player)
                 continue
 
@@ -323,10 +330,22 @@ class KickbaseMarketMixin:
         return self._response_payload(response)
 
     def player_transfer_state(self, league_id: str, player_id: str) -> dict:
-        """Offer loading is intentionally disabled until the official request is captured."""
-        raise KickbaseError(
-            "Angebote laden ist noch nicht verifiziert. Der Request wird erst nach einem Mitschnitt der offiziellen App freigeschaltet."
-        )
+        """Return the live listing/offer state for one player.
+
+        Kickbase exposes incoming offers for an owned listing on the player's
+        ``/transfers`` endpoint. This is distinct from ``/transferHistory``,
+        which contains completed transfers only.
+        """
+        payload = self._get_json(f"/v4/leagues/{league_id}/players/{player_id}/transfers")
+        if not isinstance(payload, dict):
+            payload = {}
+        return {
+            "raw": payload,
+            "offers": self.normalize_incoming_offers(payload),
+            "is_on_market": bool(payload.get("iotm") or payload.get("iposl")),
+            "market_value": self._first_int(payload, ("mv", "marketValue")),
+            "listing_price": self._first_int(payload, ("prc", "price", "p")),
+        }
 
     def normalize_incoming_offers(self, payload: dict) -> list[dict]:
         """Keep the parser ready for the verified offer payload once available."""
@@ -339,7 +358,7 @@ class KickbaseMarketMixin:
         for raw in offers:
             if not isinstance(raw, dict):
                 continue
-            offer_id = raw.get("i") or raw.get("id") or raw.get("oi") or raw.get("ofi") or raw.get("offerId")
+            raw_offer_id = raw.get("i") or raw.get("id") or raw.get("oi") or raw.get("ofi") or raw.get("offerId")
             price = self._first_int(raw, ("prc", "price", "p", "amount", "bid", "uop"))
             user = raw.get("u") or raw.get("ui") or raw.get("user") or raw.get("userId") or raw.get("uid")
             user_id = None
@@ -351,6 +370,9 @@ class KickbaseMarketMixin:
                 user_id = user
             user_id = raw.get("uoid") or raw.get("oui") or user_id
             user_name = raw.get("unm") or raw.get("username") or raw.get("name") or user_name
+            # In current v4 responses the path offerId is the bidder user id
+            # (uoid/u). Prefer that verified identifier over legacy generic ids.
+            offer_id = raw.get("uoid") or raw.get("oui") or raw_offer_id or user_id
             is_kickbase = user_id is None and not user_name
             result.append({
                 "offer_id": str(offer_id) if offer_id is not None else None,
@@ -363,14 +385,22 @@ class KickbaseMarketMixin:
         return sorted(result, key=lambda row: int(row.get("price") or 0), reverse=True)
 
     def accept_manager_offer(self, league_id: str, player_id: str, offer_id: str) -> dict:
-        raise KickbaseError(
-            "Angebote annehmen ist noch nicht verifiziert und deshalb aus Sicherheitsgründen deaktiviert."
+        if not offer_id:
+            raise KickbaseError("Keine Angebots-ID vorhanden.")
+        response = self.client.post(
+            f"/v4/leagues/{league_id}/market/{player_id}/offers/{offer_id}/accept"
         )
+        self._raise_write_error("Manager-Angebot annehmen", response)
+        return self._response_payload(response)
 
     def decline_manager_offer(self, league_id: str, player_id: str, offer_id: str) -> dict:
-        raise KickbaseError(
-            "Angebote ablehnen ist noch nicht verifiziert und deshalb aus Sicherheitsgründen deaktiviert."
+        if not offer_id:
+            raise KickbaseError("Keine Angebots-ID vorhanden.")
+        response = self.client.post(
+            f"/v4/leagues/{league_id}/market/{player_id}/offers/{offer_id}/decline"
         )
+        self._raise_write_error("Manager-Angebot ablehnen", response)
+        return self._response_payload(response)
 
     def accept_kickbase_sale_offer(self, league_id: str, player_id: str) -> dict:
         """Accept the current Kickbase-owned sale offer for a listed player.

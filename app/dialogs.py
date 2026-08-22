@@ -5,7 +5,7 @@ review scope manageable while preserving the public import surface.
 """
 
 from .action_dialogs import (
-    FinancingScenarioDialog, LineupOptimizerDialog, ListingManagementDialog, LoginDialog,
+    FinancingScenarioDialog, LineupOptimizerDialog, ListingManagementDialog, LoginDialog, OfferInboxDialog,
     MarketBidDialog, MarketScannerDialog, MarketScoringInfoDialog, PortraitReviewDialog,
     PreseasonOptimizerDialog, SellPlayerDialog, SquadScoringInfoDialog,
 )
@@ -16,7 +16,7 @@ from .player_dialogs import (
 )
 
 __all__ = [
-    "FinancingScenarioDialog", "LineupOptimizerDialog", "ListingManagementDialog", "LoginDialog",
+    "FinancingScenarioDialog", "LineupOptimizerDialog", "ListingManagementDialog", "LoginDialog", "OfferInboxDialog",
     "ManagerComparisonDialog", "ManagerDetailDialog", "ManagerTransferDialog", "MarketBidDialog",
     "MarketScannerDialog", "MarketScoringInfoDialog", "MatchEventBreakdownDialog",
     "PlayerComparisonDialog", "PlayerDetailDialog", "PlayerDetailTabsWindow", "PortraitReviewDialog",

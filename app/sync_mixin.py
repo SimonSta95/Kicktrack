@@ -164,6 +164,8 @@ class SyncMixin:
         if league_id:
             self.storage.set_setting("league_id", league_id)
             self._apply_coach_access(str(league_id))
+            self._invalidate_page_cache()
+            self._market_rows = []
             self.refresh_all()
 
     def _refresh_player_master_stats(self) -> None:
@@ -389,6 +391,9 @@ class SyncMixin:
             if result.manager_id:
                 self.settings_manager.setText(result.manager_id)
             self._apply_coach_access(result.league_id)
+            self._invalidate_page_cache()
+            # Existing market rows are still useful while the user navigates;
+            # only an explicit market refresh replaces them.
             self.refresh_all()
 
             metrics = self.storage.dashboard_metrics(result.league_id)

@@ -91,9 +91,9 @@ from .bidding import calculate_bid_capacity
 from .selling import listing_price_for_percent
 from .squad_analysis import enrich_squad_entries
 from .coach_analysis import build_coach_recommendations
-from .portfolio_analysis import analyze_portfolio
+from .portfolio_analysis import next_solvency_deadline
 from .transfer_evaluation import evaluate_trade_cycles, transfer_evaluation_summary
-from .preseason_tools import add_value_scores, optimize_starting_squad
+from .preseason_tools import optimize_starting_squad
 from .squad_rules import MAX_SQUAD_SIZE, active_bid_count, squad_capacity
 from .player_master import sync_player_master, sync_missing_portraits, cache_review_candidate
 from .league_learning import (
@@ -269,12 +269,6 @@ class CoachMixin:
         head.addWidget(verdict)
         head.addWidget(name)
         head.addStretch()
-        priority = int(rec.get("priority") or 0)
-        if priority:
-            prio = QLabel(f"PRIO {priority}")
-            prio.setObjectName("CoachPriority")
-            prio.setProperty("level", "high" if priority >= 90 else "medium" if priority >= 75 else "low")
-            head.addWidget(prio)
         body.addLayout(head)
         body.addWidget(meta)
 
@@ -331,11 +325,8 @@ class CoachMixin:
         mv_value = rec.get("market_value")
         if price_value and int(price_value or 0) != int(mv_value or 0):
             facts.append(money_chip("Preis", price_value))
-        facts.append(money_chip("Max-Bid", rec.get("max_bid")))
         facts.append(money_chip("Gebot", rec.get("own_bid")))
         raw = dict(rec.get("raw") or {})
-        if raw.get("value_score") is not None:
-            facts.append(f"Value {int(raw.get('value_score') or 0)}/100")
         expires = str(raw.get("expires") or raw.get("expiry") or rec.get("expires") or "").strip()
         if expires and expires != "–":
             facts.append(f"Ablauf {expires}")
@@ -402,8 +393,6 @@ class CoachMixin:
 
         points_are_current = self._season_stats_current(league_id)
         free_budget = int(getattr(self, "_market_budget", 0) or 0)
-        cash_balance = int(getattr(self, "_cash_balance", 0) or free_budget)
-        committed = int(getattr(self, "_active_bid_committed", 0) or 0)
         squad = enrich_squad_entries(
             self._player_metrics(),
             points_are_current=points_are_current,
@@ -411,13 +400,12 @@ class CoachMixin:
             available_budget=free_budget,
         )
         capacity = squad_capacity(squad)
-        portfolio_market, portfolio_squad, portfolio_summary = analyze_portfolio(
-            self._market_rows,
-            squad,
-            available_budget=cash_balance,
-            season_started=self._season_mode_active(),
-            committed_budget=committed,
-        )
+        portfolio_market = [dict(row) for row in self._market_rows]
+        portfolio_squad = [dict(row) for row in squad]
+        portfolio_summary = {
+            "deadline": next_solvency_deadline(season_started=self._season_mode_active()),
+            "balance_after_commitments": free_budget,
+        }
         manager_id = self.storage.get_league_setting(str(league_id), "manager_id") or self.storage.get_setting("manager_id")
         recs = build_coach_recommendations(
             portfolio_market,

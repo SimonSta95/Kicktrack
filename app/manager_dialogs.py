@@ -92,6 +92,7 @@ from .selling import listing_price_for_percent
 from .squad_analysis import enrich_squad_entries
 from .coach_analysis import build_coach_recommendations
 from .portfolio_analysis import analyze_portfolio
+from .player_dialogs import open_player_detail_window
 from .transfer_evaluation import evaluate_trade_cycles, transfer_evaluation_summary
 from .preseason_tools import add_value_scores, optimize_starting_squad
 from .squad_rules import MAX_SQUAD_SIZE, active_bid_count, squad_capacity

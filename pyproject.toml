@@ -1,6 +1,6 @@
 [project]
 name = "kicktrack"
-version = "6.1.5"
+version = "6.3.5"
 description = "Desktop analytics companion for a personal Kickbase squad"
 requires-python = ">=3.11"
 dependencies = [

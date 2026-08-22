@@ -21,8 +21,8 @@ from PySide6.QtCharts import (
     QPieSeries,
     QValueAxis,
 )
-from PySide6.QtCore import QDateTime, QEvent, QMargins, QPoint, QRectF, QSize, Qt, QThreadPool, QTimer, Signal, QStringListModel
-from PySide6.QtGui import QColor, QCursor, QFont, QIcon, QPainter, QPen, QPixmap
+from PySide6.QtCore import QDateTime, QEvent, QMargins, QPoint, QPointF, QRectF, QSize, Qt, QThreadPool, QTimer, Signal, QStringListModel
+from PySide6.QtGui import QColor, QCursor, QFont, QIcon, QPainter, QPainterPath, QPen, QPixmap
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QCheckBox,
@@ -36,6 +36,7 @@ from PySide6.QtWidgets import (
     QLabel,
     QLineEdit,
     QMainWindow,
+    QMenu,
     QScrollArea,
     QSizePolicy,
     QMessageBox,
@@ -404,8 +405,11 @@ class ResponsiveTableWidget(QTableWidget):
         super().leaveEvent(event)
 
     def viewportEvent(self, event) -> bool:
-        if event.type() == QEvent.ToolTip:
-            # Suppress Qt's fragile native tooltip; our delayed popover is used instead.
+        if event.type() == QEvent.ToolTip and self._hover_popovers_enabled:
+            # When the richer delayed hover popover is enabled, suppress Qt's
+            # native tooltip so both systems do not fight each other. Tables
+            # that explicitly disable hover popovers (notably the market) fall
+            # back to the normal item tooltip, which is reliable and cheap.
             return True
         return super().viewportEvent(event)
 
@@ -504,6 +508,308 @@ class ClubItemDelegate(QStyledItemDelegate):
         elided = metrics.elidedText(text, Qt.ElideRight, text_rect.width())
         painter.drawText(text_rect, Qt.AlignLeft | Qt.AlignVCenter, elided)
         painter.restore()
+
+_MARKET_TREND_PALETTE = {
+    "ACCELERATING_UP": QColor("#38D98A"),
+    "STABLE_UP": QColor("#38D98A"),
+    "SLOWING_UP": QColor("#F3A847"),
+    "TURNING_UP": QColor("#38D98A"),
+    "TURNING_DOWN": QColor("#FF5A5F"),
+    "SIDEWAYS": QColor("#7C8690"),
+    "RECOVERING": QColor("#F3A847"),
+    "STABLE_DOWN": QColor("#FF5A5F"),
+    "ACCELERATING_DOWN": QColor("#FF5A5F"),
+    "UNKNOWN": QColor("#7C8690"),
+}
+
+_MARKET_TREND_LABELS = {
+    "ACCELERATING_UP": "Beschleunigend steigend",
+    "STABLE_UP": "Stabil steigend",
+    "SLOWING_UP": "Verlangsamend steigend",
+    "TURNING_UP": "Trendwende aufwärts",
+    "TURNING_DOWN": "Trendwende abwärts",
+    "SIDEWAYS": "Seitwärts",
+    "RECOVERING": "Erholung",
+    "STABLE_DOWN": "Stabil fallend",
+    "ACCELERATING_DOWN": "Beschleunigt fallend",
+    "UNKNOWN": "Zu wenig Daten",
+}
+
+
+
+
+def _trend_arrow_head(path: QPainterPath, tip_x: float, tip_y: float, dx: float, dy: float, size: float = 3.4) -> None:
+    import math
+    length = max(0.001, math.hypot(dx, dy))
+    ux, uy = dx / length, dy / length
+    px, py = -uy, ux
+    bx, by = tip_x - ux * size, tip_y - uy * size
+    path.moveTo(tip_x, tip_y)
+    path.lineTo(bx + px * size * 0.58, by + py * size * 0.58)
+    path.moveTo(tip_x, tip_y)
+    path.lineTo(bx - px * size * 0.58, by - py * size * 0.58)
+
+
+def paint_market_trend_icon(painter: QPainter, rect: QRectF, code: str) -> None:
+    """Paint a clean line-arrow icon set for market trends.
+
+    The requested look is closer to common outline arrow/chevron packs: clean
+    strokes, consistent 45° geometry and no decorative custom blobs.
+    """
+    code = str(code or "UNKNOWN").upper()
+    color = _MARKET_TREND_PALETTE.get(code, _MARKET_TREND_PALETTE["UNKNOWN"])
+    painter.setRenderHint(QPainter.Antialiasing, True)
+
+    size = max(14.0, min(float(rect.width()), float(rect.height())) - 6.0)
+    cx, cy = float(rect.center().x()), float(rect.center().y())
+    half = size / 2.0
+    left, right = cx - half, cx + half
+    top, bottom = cy - half, cy + half
+    pen = QPen(color, max(2.0, size * 0.14), Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin)
+    painter.setPen(pen)
+    painter.setBrush(Qt.NoBrush)
+
+    def draw_polyline(points: list[tuple[float, float]]):
+        path = QPainterPath()
+        if not points:
+            return
+        path.moveTo(*points[0])
+        for point in points[1:]:
+            path.lineTo(*point)
+        painter.drawPath(path)
+
+    def draw_head(tip_x: float, tip_y: float, dx: float, dy: float, length: float | None = None) -> None:
+        import math
+        head = length or max(4.2, size * 0.22)
+        norm = max(0.001, math.hypot(dx, dy))
+        ux, uy = dx / norm, dy / norm
+        px, py = -uy, ux
+        bx, by = tip_x - ux * head, tip_y - uy * head
+        painter.drawLine(QPointF(tip_x, tip_y), QPointF(bx + px * head * 0.58, by + py * head * 0.58))
+        painter.drawLine(QPointF(tip_x, tip_y), QPointF(bx - px * head * 0.58, by - py * head * 0.58))
+
+    def draw_arrow(points: list[tuple[float, float]], dx: float, dy: float):
+        draw_polyline(points)
+        tip_x, tip_y = points[-1]
+        draw_head(tip_x, tip_y, dx, dy)
+
+    def draw_chevron(center_x: float, center_y: float, dx: float, dy: float, spread: float = 0.0):
+        import math
+        norm = max(0.001, math.hypot(dx, dy))
+        ux, uy = dx / norm, dy / norm
+        px, py = -uy, ux
+        arm = max(4.5, size * 0.26)
+        tip_x = center_x + ux * arm
+        tip_y = center_y + uy * arm
+        back_x = center_x - ux * arm * 0.55
+        back_y = center_y - uy * arm * 0.55
+        left_x = back_x + px * arm * 0.78
+        left_y = back_y + py * arm * 0.78
+        right_x = back_x - px * arm * 0.78
+        right_y = back_y - py * arm * 0.78
+        if spread:
+            center_x += px * spread
+            center_y += py * spread
+        painter.drawLine(QPointF(left_x, left_y), QPointF(tip_x, tip_y))
+        painter.drawLine(QPointF(right_x, right_y), QPointF(tip_x, tip_y))
+
+    if code == "ACCELERATING_UP":
+        draw_chevron(cx - size * 0.14, cy + size * 0.14, 1, -1)
+        draw_chevron(cx + size * 0.18, cy - size * 0.18, 1, -1)
+        return
+    if code == "STABLE_UP":
+        draw_arrow([(left + 2, bottom - 2), (right - 2, top + 2)], 1, -1)
+        return
+    if code == "SLOWING_UP":
+        draw_arrow([(left + 2, bottom - 2), (cx - 1, top + 3), (right - 2, top + 3)], 1, 0)
+        return
+    if code == "TURNING_UP":
+        draw_arrow([(left + 2, top + 3), (cx - 2, bottom - 2), (right - 2, top + 3)], 1, -1)
+        return
+    if code == "TURNING_DOWN":
+        draw_arrow([(left + 2, bottom - 3), (cx - 2, top + 2), (right - 2, bottom - 3)], 1, 1)
+        return
+    if code == "SIDEWAYS":
+        draw_arrow([(left + 2, cy), (right - 2, cy)], 1, 0)
+        return
+    if code == "RECOVERING":
+        draw_arrow([(left + 2, cy + size * 0.18), (cx - 2, bottom - 2), (right - 2, cy - size * 0.08)], 1, -0.55)
+        return
+    if code == "STABLE_DOWN":
+        draw_arrow([(left + 2, top + 2), (right - 2, bottom - 2)], 1, 1)
+        return
+    if code == "ACCELERATING_DOWN":
+        draw_chevron(cx - size * 0.14, cy - size * 0.14, 1, 1)
+        draw_chevron(cx + size * 0.18, cy + size * 0.18, 1, 1)
+        return
+
+    painter.setPen(Qt.NoPen)
+    painter.setBrush(color)
+    for fraction in (0.25, 0.5, 0.75):
+        painter.drawEllipse(QRectF(left + size * fraction - 1.3, cy - 1.3, 2.6, 2.6))
+
+
+def market_trend_icon_pixmap(code: str, size: int = 26) -> QPixmap:
+    code = str(code or "UNKNOWN").upper()
+    pixmap = QPixmap(size, size)
+    pixmap.fill(Qt.transparent)
+    painter = QPainter(pixmap)
+    try:
+        paint_market_trend_icon(painter, QRectF(0, 0, size, size), code)
+    finally:
+        painter.end()
+    return pixmap
+
+
+
+class MarketTrendLegend(QWidget):
+    """Visible legend for the icon-only trend column."""
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(10)
+
+        title = QLabel("DYNAMIK:")
+        title.setObjectName("Tiny")
+        layout.addWidget(title)
+
+        entries = (
+            ("ACCELERATING_UP", "Beschleunigend"),
+            ("STABLE_UP", "Stabil steigend"),
+            ("SLOWING_UP", "Verlangsamend"),
+            ("TURNING_UP", "Wende ↑"),
+            ("TURNING_DOWN", "Wende ↓"),
+            ("SIDEWAYS", "Seitwärts"),
+            ("RECOVERING", "Erholung"),
+            ("STABLE_DOWN", "Fallend"),
+            ("ACCELERATING_DOWN", "Beschl. fallend"),
+        )
+        for code, text in entries:
+            entry = QWidget(self)
+            entry_layout = QHBoxLayout(entry)
+            entry_layout.setContentsMargins(0, 0, 0, 0)
+            entry_layout.setSpacing(4)
+            icon = QLabel(entry)
+            icon.setPixmap(market_trend_icon_pixmap(code, 22))
+            icon.setFixedSize(22, 22)
+            icon.setToolTip(_MARKET_TREND_LABELS[code])
+            label = QLabel(text, entry)
+            label.setObjectName("Tiny")
+            label.setToolTip(_MARKET_TREND_LABELS[code])
+            entry_layout.addWidget(icon)
+            entry_layout.addWidget(label)
+            layout.addWidget(entry)
+        layout.addStretch(1)
+
+
+class MarketTrendIconDelegate(QStyledItemDelegate):
+    """Paint compact CI-style vector trend icons without Unicode/ASCII glyphs."""
+
+    def paint(self, painter, option, index) -> None:
+        painter.save()
+        try:
+            selected = bool(option.state & QStyle.State_Selected)
+            row_bg = QColor("#211A16") if selected else QColor("#14181B") if index.row() % 2 else QColor("#101316")
+            painter.fillRect(option.rect, row_bg)
+            code = str(index.data(Qt.UserRole + 2) or "UNKNOWN").upper()
+            pixmap = market_trend_icon_pixmap(code, min(24, max(18, option.rect.height() - 12)))
+            x = option.rect.center().x() - pixmap.width() // 2
+            y = option.rect.center().y() - pixmap.height() // 2
+            painter.drawPixmap(x, y, pixmap)
+        finally:
+            painter.restore()
+
+
+class SquadRoleDelegate(QStyledItemDelegate):
+    """Editable role chip for the squad table.
+
+    The role is stored as a normal QTableWidgetItem.  Unlike a persistent
+    QComboBox cell widget, that item moves atomically with the row when Qt sorts
+    the table.  A transient combo editor exists only while the role is edited.
+    """
+
+    roleChanged = Signal(str, str)
+
+    _ROLES = ("OFFEN", "STAMM", "INVEST", "TRANSFERLISTE")
+
+    @staticmethod
+    def _palette(role: str) -> tuple[QColor, QColor, QColor]:
+        role = str(role or "OFFEN").upper().strip()
+        if role == "STAMM":
+            return QColor("#10251A"), QColor("#285B3C"), QColor("#65E89C")
+        if role == "INVEST":
+            return QColor("#21152C"), QColor("#58376E"), QColor("#C58BFF")
+        if role == "TRANSFERLISTE":
+            return QColor("#2A180E"), QColor("#71401D"), QColor("#FF6A2A")
+        return QColor("#171D22"), QColor("#34414B"), QColor("#B9C5CE")
+
+    def paint(self, painter, option, index) -> None:
+        painter.save()
+        selected = bool(option.state & QStyle.State_Selected)
+        row_bg = QColor("#211A16") if selected else QColor("#14181B") if index.row() % 2 else QColor("#101316")
+        painter.fillRect(option.rect, row_bg)
+        role = str(index.data(Qt.DisplayRole) or "OFFEN")
+        bg, border, fg = self._palette(role)
+        rect = QRectF(option.rect.adjusted(8, 7, -8, -7))
+        painter.setRenderHint(QPainter.Antialiasing)
+        painter.setPen(QPen(border, 1))
+        painter.setBrush(bg)
+        painter.drawRoundedRect(rect, 7, 7)
+        painter.setPen(fg)
+        font = painter.font()
+        font.setBold(True)
+        painter.setFont(font)
+        painter.drawText(rect.adjusted(10, 0, -20, 0), Qt.AlignLeft | Qt.AlignVCenter, role)
+        # Small vector chevron; no font/unicode dependency.
+        cx = rect.right() - 11
+        cy = rect.center().y()
+        painter.setPen(QPen(fg, 1.4))
+        painter.drawLine(QPointF(cx - 3, cy - 1.5), QPointF(cx, cy + 1.5))
+        painter.drawLine(QPointF(cx, cy + 1.5), QPointF(cx + 3, cy - 1.5))
+        painter.restore()
+
+    def open_role_menu(self, table: QTableWidget, index) -> None:
+        """Open a compact role picker without replacing the painted chip.
+
+        A QComboBox delegate editor briefly covered the whole cell on Windows,
+        which made the role control jump to a large dark rectangle.  A popup
+        menu keeps the painted chip untouched and only overlays the choices.
+        """
+        if not index.isValid():
+            return
+        current = str(index.data(Qt.DisplayRole) or "OFFEN").upper()
+        menu = QMenu(table)
+        menu.setObjectName("SquadRoleMenu")
+        menu.setStyleSheet(
+            "QMenu#SquadRoleMenu { background:#14191D; color:#E8EDF2; "
+            "border:1px solid #34414B; border-radius:8px; padding:5px; } "
+            "QMenu#SquadRoleMenu::item { padding:7px 18px 7px 12px; border-radius:5px; } "
+            "QMenu#SquadRoleMenu::item:selected { background:#232B31; } "
+            "QMenu#SquadRoleMenu::indicator { width:0px; height:0px; }"
+        )
+        for role in self._ROLES:
+            action = menu.addAction(ROLE_LABELS.get(role, role))
+            action.setCheckable(True)
+            action.setChecked(role == current)
+            action.triggered.connect(lambda _checked=False, r=role, idx=index: self._apply_role(idx, r))
+
+        rect = table.visualRect(index)
+        popup_pos = table.viewport().mapToGlobal(rect.bottomLeft())
+        # Keep the menu alive until Qt closes it. exec() is local/nested and
+        # avoids ownership/timing glitches from a short-lived popup instance.
+        menu.exec(popup_pos)
+
+    def _apply_role(self, index, role: str) -> None:
+        role = str(role or "OFFEN").upper()
+        model = index.model()
+        model.setData(index, role, Qt.DisplayRole)
+        model.setData(index, ROLE_SORT.get(role, 99), SORT_ROLE)
+        player_id = str(index.data(Qt.UserRole) or "")
+        if player_id:
+            self.roleChanged.emit(player_id, role)
+
 
 class RecommendationChipDelegate(QStyledItemDelegate):
     """Paint one compact recommendation pill directly in the table cell.
@@ -1357,15 +1663,13 @@ class BudgetBidList(QFrame):
             body.addLayout(head)
 
             market_value = int(bid.get("market_value") or 0)
-            max_bid = int(bid.get("max_bid") or 0)
-            winning_price = int(bid.get("league_winning_price") or 0)
             context = []
             if market_value:
                 context.append(f"MW {euro(market_value)}")
-            if max_bid:
-                context.append(f"Max-Bid {euro(max_bid)}")
-            if winning_price:
-                context.append(f"Liga ~{euro(winning_price)}")
+            own_bid = int(bid.get("bid") or bid.get("amount") or bid.get("price") or 0)
+            if market_value and own_bid:
+                premium = (own_bid - market_value) / market_value * 100.0
+                context.append(f"Gebot {premium:+.1f}% zum MW")
             if context:
                 context_label = QLabel("  ·  ".join(context))
                 context_label.setObjectName("BudgetBidMeta")

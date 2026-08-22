@@ -146,7 +146,8 @@ class AnalysisMixin:
         self._schedule_own_transfer_history_backfill(league_id, rows)
 
         history_by_player: dict[str, list[dict]] = defaultdict(list)
-        for mv in self.storage.all_market_value_rows():
+        transfer_player_ids = {str(row.get("player_id") or "") for row in rows if row.get("player_id")}
+        for mv in self.storage.market_value_rows_for_players(transfer_player_ids):
             history_by_player[str(mv.get("player_id") or "")].append(mv)
 
         # Use already persisted/cached performance data when available. We do

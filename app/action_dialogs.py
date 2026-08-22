@@ -428,7 +428,6 @@ class PreseasonOptimizerDialog(QDialog):
         grid = QGridLayout(summary); grid.setContentsMargins(14, 12, 14, 12); grid.setSpacing(8)
         values = [
             ("FORMATION", str(result.get("formation") or "–")),
-            ("TEAM-SCORE", f"{float(result.get('score') or 0):.1f}/100"),
             ("NEUE KÄUFE", str(int(result.get("market_buys") or 0))),
             ("VERKÄUFE NÖTIG", str(int(result.get("required_sales") or 0))),
             ("AUSGABEN", euro(result.get("spent"))),
@@ -464,8 +463,8 @@ class PreseasonOptimizerDialog(QDialog):
             root.addWidget(roster_warning)
 
         table = QTableWidget()
-        table.setColumnCount(7)
-        table.setHorizontalHeaderLabels(["SPIELER", "VEREIN", "POS", "QUELLE", "SCORE", "KOSTEN", "ROLLE"])
+        table.setColumnCount(6)
+        table.setHorizontalHeaderLabels(["SPIELER", "VEREIN", "POS", "QUELLE", "KOSTEN", "ROLLE"])
         table.setRowCount(len(result.get("players") or []))
         table.verticalHeader().setVisible(False)
         table.setEditTriggers(QTableWidget.NoEditTriggers)
@@ -476,7 +475,6 @@ class PreseasonOptimizerDialog(QDialog):
         table.horizontalHeader().setSectionResizeMode(3, QHeaderView.ResizeToContents)
         table.horizontalHeader().setSectionResizeMode(4, QHeaderView.ResizeToContents)
         table.horizontalHeader().setSectionResizeMode(5, QHeaderView.ResizeToContents)
-        table.horizontalHeader().setSectionResizeMode(6, QHeaderView.ResizeToContents)
         for r, player in enumerate(result.get("players") or []):
             source = str(player.get("optimizer_source") or "")
             role = str(player.get("portfolio_role") or player.get("action") or player.get("player_role") or "–")
@@ -485,7 +483,6 @@ class PreseasonOptimizerDialog(QDialog):
                 str(player.get("club") or "–"),
                 str(player.get("position") or "–"),
                 "NEU KAUFEN" if source == "MARKT" else "DEIN KADER",
-                f"{float(player.get('optimizer_score') or 0):.1f}",
                 euro(player.get("optimizer_cost")) if source == "MARKT" else "–",
                 role,
             ]
@@ -684,8 +681,8 @@ class SellPlayerDialog(QDialog):
         self.amount = self._parsed_amount()
         self.accept()
 
-class ListingManagementDialog(QDialog):
-    """Manage one own listing. Offer actions stay visible but disabled until verified."""
+class OfferInboxDialog(QDialog):
+    """One sale-offer inbox: current Kickbase offer plus incoming manager offers."""
 
     def __init__(self, parent, client: KickbaseClient, league_id: str, player: dict, refresh_callback=None) -> None:
         super().__init__(parent)
@@ -694,9 +691,175 @@ class ListingManagementDialog(QDialog):
         self.player = dict(player or {})
         self.player_id = str(self.player.get("player_id") or "")
         self.refresh_callback = refresh_callback
-        self.setWindowTitle("Verkauf verwalten")
-        self.setMinimumWidth(620)
-        self.resize(680, 430)
+        self._offers: list[dict] = []
+        self.setWindowTitle("Angebote")
+        self.setMinimumSize(620, 360)
+        self.resize(720, 460)
+
+        root = QVBoxLayout(self)
+        root.setContentsMargins(20, 18, 20, 18)
+        root.setSpacing(12)
+
+        title = QLabel(str(self.player.get("full_name") or self.player.get("name") or "Spieler"))
+        title.setObjectName("SectionTitle")
+        root.addWidget(title)
+        self.meta = QLabel(
+            f"Marktwert {euro(self.player.get('market_value'))} · "
+            f"Listenpreis {euro(self.player.get('listing_price') or self.player.get('price'))}"
+        )
+        self.meta.setObjectName("Subtle")
+        root.addWidget(self.meta)
+
+        self.status = QLabel("Angebote werden geladen …")
+        self.status.setObjectName("Subtle")
+        root.addWidget(self.status)
+
+        self.table = QTableWidget(0, 4, self)
+        self.table.setHorizontalHeaderLabels(["MANAGER", "ANGEBOT", "Δ MW", "AKTION"])
+        self.table.verticalHeader().setVisible(False)
+        self.table.setSelectionMode(QAbstractItemView.NoSelection)
+        self.table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        self.table.setAlternatingRowColors(False)
+        self.table.horizontalHeader().setSectionResizeMode(0, QHeaderView.Stretch)
+        self.table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeToContents)
+        self.table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeToContents)
+        self.table.horizontalHeader().setSectionResizeMode(3, QHeaderView.ResizeToContents)
+        root.addWidget(self.table, 1)
+
+        footer = QHBoxLayout()
+        reload_btn = QPushButton("AKTUALISIEREN")
+        reload_btn.clicked.connect(self._load_offers)
+        close_btn = QPushButton("SCHLIESSEN")
+        close_btn.clicked.connect(self.accept)
+        footer.addWidget(reload_btn)
+        footer.addStretch()
+        footer.addWidget(close_btn)
+        root.addLayout(footer)
+
+        QTimer.singleShot(0, self._load_offers)
+
+    def _load_offers(self) -> None:
+        if not self.player_id:
+            self.status.setText("Spieler-ID fehlt.")
+            return
+        try:
+            state = self.client.player_transfer_state(self.league_id, self.player_id)
+        except Exception as exc:
+            self.status.setText("Angebote konnten nicht geladen werden.")
+            QMessageBox.warning(self, "Angebote laden fehlgeschlagen", str(exc))
+            return
+        live_mv = int(state.get("market_value") or self.player.get("market_value") or 0)
+        live_listing = int(state.get("listing_price") or self.player.get("listing_price") or self.player.get("price") or 0)
+        if live_mv > 0:
+            self.player["market_value"] = live_mv
+        if live_listing > 0:
+            self.player["listing_price"] = live_listing
+            self.player["price"] = live_listing
+        self.meta.setText(
+            f"Marktwert {euro(self.player.get('market_value'))} · "
+            f"Listenpreis {euro(self.player.get('listing_price') or self.player.get('price'))}"
+        )
+
+        # Kickbase's instant-sale path is a real offer too. Keep it in the same
+        # inbox instead of hiding it behind a second, duplicate sale UI.
+        offers = []
+        if live_mv > 0:
+            offers.append({
+                "offer_id": None,
+                "price": live_mv,
+                "user_id": None,
+                "user_name": "Kickbase",
+                "is_kickbase": True,
+                "raw": {},
+            })
+        offers.extend(
+            dict(row) for row in (state.get("offers") or [])
+            if isinstance(row, dict) and not bool(row.get("is_kickbase"))
+        )
+        self._offers = sorted(offers, key=lambda row: int(row.get("price") or 0), reverse=True)
+        self._render_offers()
+
+    def _render_offers(self) -> None:
+        offers = list(self._offers)
+        self.table.setRowCount(len(offers))
+        market_value = int(self.player.get("market_value") or 0)
+        for row, offer in enumerate(offers):
+            bidder = str(offer.get("user_name") or "Manager")
+            price = int(offer.get("price") or 0)
+            delta = price - market_value if market_value else None
+            values = [
+                table_item(bidder, bidder.casefold()),
+                table_item(euro(price), price),
+                table_item(delta_text(delta, compact=True) if delta is not None else "–", delta if delta is not None else 0),
+            ]
+            if delta is not None:
+                set_item_delta_color(values[2], delta)
+            for col, item in enumerate(values):
+                self.table.setItem(row, col, item)
+
+            accept_btn = QPushButton("ANNEHMEN")
+            accept_btn.setObjectName("CompactDangerActionButton")
+            accept_btn.setMinimumWidth(92)
+            accept_btn.setToolTip(
+                f"{euro(price)} von {bidder} annehmen · verkauft den Spieler sofort"
+            )
+            accept_btn.clicked.connect(lambda _checked=False, o=dict(offer): self._accept_offer(o))
+            self.table.setCellWidget(row, 3, accept_btn)
+            self.table.setRowHeight(row, 42)
+
+        if offers:
+            best = max(int(row.get("price") or 0) for row in offers)
+            self.status.setText(f"{len(offers)} Angebot{'e' if len(offers) != 1 else ''} · bestes {euro(best)}")
+        else:
+            self.status.setText("Aktuell keine Verkaufsangebote vorhanden.")
+
+    def _accept_offer(self, offer: dict) -> None:
+        is_kickbase = bool(offer.get("is_kickbase"))
+        offer_id = str(offer.get("offer_id") or offer.get("user_id") or "")
+        bidder = "Kickbase" if is_kickbase else str(offer.get("user_name") or "Manager")
+        price = int(offer.get("price") or 0)
+        name = str(self.player.get("full_name") or self.player.get("name") or "Spieler")
+        if not is_kickbase and not offer_id:
+            QMessageBox.warning(self, "Angebot", "Dieses Manager-Angebot enthält keine verwertbare Angebots-ID.")
+            return
+        answer = QMessageBox.question(
+            self,
+            "Angebot annehmen?",
+            f"{name} für {euro(price)} an {bidder} verkaufen?\n\n"
+            "Das ist eine echte Kickbase-Transaktion und kann in KickTrack nicht rückgängig gemacht werden.",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        if answer != QMessageBox.Yes:
+            return
+        try:
+            if is_kickbase:
+                self.client.accept_kickbase_sale_offer(self.league_id, self.player_id)
+            else:
+                self.client.accept_manager_offer(self.league_id, self.player_id, offer_id)
+        except Exception as exc:
+            QMessageBox.warning(self, "Angebot konnte nicht angenommen werden", str(exc))
+            return
+        QMessageBox.information(self, "Angebot angenommen", f"{name} wurde für {euro(price)} an {bidder} verkauft.")
+        if callable(self.refresh_callback):
+            self.refresh_callback()
+        self.accept()
+
+
+
+class ListingManagementDialog(QDialog):
+    """Manage listing price/delisting; offer acceptance lives in its own modal."""
+
+    def __init__(self, parent, client: KickbaseClient, league_id: str, player: dict, refresh_callback=None) -> None:
+        super().__init__(parent)
+        self.client = client
+        self.league_id = str(league_id)
+        self.player = dict(player or {})
+        self.player_id = str(self.player.get("player_id") or "")
+        self.refresh_callback = refresh_callback
+        self.setWindowTitle("Listing verwalten")
+        self.setMinimumWidth(560)
+        self.resize(620, 330)
 
         root = QVBoxLayout(self)
         root.setContentsMargins(20, 18, 20, 18)
@@ -712,76 +875,20 @@ class ListingManagementDialog(QDialog):
 
         listing_actions = QHBoxLayout()
         change_price = QPushButton("PREIS ÄNDERN")
+        change_price.setObjectName("CompactDangerActionButton")
         change_price.clicked.connect(self._change_price)
         remove = QPushButton("VOM MARKT NEHMEN")
+        remove.setObjectName("CompactDangerActionButton")
         remove.clicked.connect(self._remove_listing)
         listing_actions.addWidget(change_price)
         listing_actions.addWidget(remove)
         listing_actions.addStretch()
         root.addLayout(listing_actions)
 
-        offers_title = QLabel("ANGEBOTS-CENTER")
-        offers_title.setObjectName("SectionTitle")
-        root.addWidget(offers_title)
-
-        info = QLabel(
-            "Manager-Angebote sind vorbereitet, aber weiterhin deaktiviert, bis deren echte Requests verifiziert sind. "
-            "Der separate Verkauf an Kickbase ist inzwischen verifiziert und bewusst davon getrennt."
-        )
-        info.setObjectName("Subtle")
-        info.setWordWrap(True)
-        root.addWidget(info)
-
-        offer_box = QFrame()
-        offer_box.setObjectName("MarketDetailBox")
-        offer_layout = QVBoxLayout(offer_box)
-        offer_layout.setContentsMargins(12, 10, 12, 10)
-        offer_layout.setSpacing(8)
-
-        status = QLabel("Noch keine verifizierten Angebotsdaten geladen.")
-        status.setObjectName("Subtle")
-        offer_layout.addWidget(status)
-
-        offer_actions = QHBoxLayout()
-        load_offers = QPushButton("ANGEBOTE LADEN")
-        accept_offer = QPushButton("AUSGEWÄHLTES ANNEHMEN")
-        decline_offer = QPushButton("AUSGEWÄHLTES ABLEHNEN")
-        accept_offer.setObjectName("Primary")
-        for button in (load_offers, accept_offer, decline_offer):
-            button.setEnabled(False)
-            button.setToolTip("Noch nicht verifiziert – wird nach dem Mitschnitt der offiziellen Kickbase-App freigeschaltet.")
-            offer_actions.addWidget(button)
-        offer_actions.addStretch()
-        offer_layout.addLayout(offer_actions)
-        root.addWidget(offer_box)
-
-        kickbase_box = QFrame()
-        kickbase_box.setObjectName("MarketDetailBox")
-        kickbase_layout = QVBoxLayout(kickbase_box)
-        kickbase_layout.setContentsMargins(12, 10, 12, 10)
-        kickbase_layout.setSpacing(8)
-
-        kickbase_title = QLabel("KICKBASE-ANGEBOT")
-        kickbase_title.setObjectName("SectionMini")
-        kickbase_layout.addWidget(kickbase_title)
-
-        kickbase_hint = QLabel(
-            "Verkauft den Spieler direkt an Kickbase über den verifizierten /sell-Request. "
-            "Das ist ausdrücklich kein Manager-Gebot und lässt sich nach dem Verkauf nicht über KickTrack rückgängig machen."
-        )
-        kickbase_hint.setObjectName("Subtle")
-        kickbase_hint.setWordWrap(True)
-        kickbase_layout.addWidget(kickbase_hint)
-
-        kickbase_actions = QHBoxLayout()
-        sell_to_kickbase = QPushButton("AN KICKBASE VERKAUFEN")
-        sell_to_kickbase.setObjectName("DangerSecondary")
-        sell_to_kickbase.setToolTip("Aktuelles Kickbase-Angebot annehmen und den Spieler direkt an Kickbase verkaufen")
-        sell_to_kickbase.clicked.connect(self._sell_to_kickbase)
-        kickbase_actions.addWidget(sell_to_kickbase)
-        kickbase_actions.addStretch()
-        kickbase_layout.addLayout(kickbase_actions)
-        root.addWidget(kickbase_box)
+        hint = QLabel("Angebote werden ausschließlich über die separate ANGEBOTE-Aktion verwaltet.")
+        hint.setObjectName("Subtle")
+        hint.setWordWrap(True)
+        root.addWidget(hint)
 
         root.addStretch()
         close = QPushButton("SCHLIESSEN")
@@ -818,31 +925,6 @@ class ListingManagementDialog(QDialog):
         except Exception as exc:
             QMessageBox.warning(self, "Entfernen fehlgeschlagen", str(exc))
             return
-        self._after_write()
-        self.accept()
-
-    def _sell_to_kickbase(self) -> None:
-        name = str(self.player.get("full_name") or self.player.get("name") or "Spieler")
-        message = (
-            f"{name} wirklich direkt an Kickbase verkaufen?\n\n"
-            "Dieser Button nimmt ausschließlich das aktuelle Kickbase-Angebot an. "
-            "Manager-Gebote werden damit nicht ausgewählt oder angenommen.\n\n"
-            "Der Verkauf ist eine echte schreibende Aktion und kann in KickTrack nicht rückgängig gemacht werden."
-        )
-        if QMessageBox.warning(
-            self,
-            "An Kickbase verkaufen?",
-            message,
-            QMessageBox.Yes | QMessageBox.No,
-            QMessageBox.No,
-        ) != QMessageBox.Yes:
-            return
-        try:
-            self.client.accept_kickbase_sale_offer(self.league_id, self.player_id)
-        except Exception as exc:
-            QMessageBox.warning(self, "Verkauf an Kickbase fehlgeschlagen", str(exc))
-            return
-        QMessageBox.information(self, "Verkauft", f"{name} wurde an Kickbase verkauft.")
         self._after_write()
         self.accept()
 
@@ -1009,12 +1091,12 @@ class LineupOptimizerDialog(QDialog):
         root.addWidget(self.meta)
 
         self.table = ResponsiveTableWidget()
-        self.table.setColumnCount(8)
-        self.table.setHorizontalHeaderLabels(["POS", "SPIELER", "VEREIN", "MW", "FORM", "NÄCHSTER GEGNER", "OPT-SCORE", "AKTUELL"])
+        self.table.setColumnCount(7)
+        self.table.setHorizontalHeaderLabels(["POS", "SPIELER", "VEREIN", "MW", "FORM", "NÄCHSTER GEGNER", "AKTUELL"])
         self.table.verticalHeader().setVisible(False)
         self.table.setEditTriggers(QAbstractItemView.NoEditTriggers)
         self.table.setSelectionBehavior(QTableWidget.SelectRows)
-        self.table.set_responsive_widths([65, 205, 145, 120, 115, 160, 95, 85], [58, 165, 120, 105, 95, 135, 80, 75])
+        self.table.set_responsive_widths([65, 205, 145, 120, 115, 160, 85], [58, 165, 120, 105, 95, 135, 75])
         root.addWidget(self.table, 1)
 
         self.note = QLabel("Die Aufstellung wird nicht an Kickbase übertragen. Sie ist eine transparente Entscheidungshilfe und kein automatischer Schreibzugriff.")
@@ -1059,7 +1141,7 @@ class LineupOptimizerDialog(QDialog):
 
         if result.get("feasible"):
             prefix = "AUTO → " if formation is None else ""
-            self.meta.setText(f"Formation {prefix}{result['formation']} · Team-Score {result['score']:.1f}")
+            self.meta.setText(f"Formation {prefix}{result['formation']} · 11 Spieler ausgewählt")
         else:
             missing = result.get("missing") or {}
             detail = ", ".join(f"{amount}× {pos}" for pos, amount in missing.items())
@@ -1087,7 +1169,6 @@ class LineupOptimizerDialog(QDialog):
                 euro(player.get("market_value")),
                 form_display,
                 opponent,
-                f"{float(player.get('optimizer_score') or 0):.1f}",
                 "✓" if str(player.get("player_id") or "") in self.current_ids else "NEU",
             ]
             for c, value in enumerate(values):

@@ -1,4 +1,149 @@
-# KickTrack V6.1.5
+## V6.3.5 - aktive Gebote: korrekter Aufpreis
+
+- Die Prozentanzeige `Gebot … % zum MW` verwendet bei aktiven Geboten jetzt **das tatsächliche eigene Gebot** (`bid`) und nicht mehr bevorzugt das generische `price`-Feld.
+- Dadurch wird ein Overpay wie 10.100.067 € auf 9.613.008 € MW korrekt als rund **+5,1 %** angezeigt statt fälschlich `+0,0 %`.
+- Regressionstest verhindert, dass `price` künftig wieder vor `bid` priorisiert wird.
+
+# KickTrack V6.3.5
+
+## V6.3.4 - Aktionszelle ohne Container-Kasten
+
+- Die Aktionsspalte der eigenen Listings zeigt jetzt nur noch die beiden kompakten Sekundär-Buttons.
+- Der bisher sichtbare dunkle Wrapper um `LISTING` und `ANGEBOTE` ist explizit transparent und ohne Border.
+- Regressionstest stellt sicher, dass der Zell-Container nicht wieder als sichtbare Box gerendert wird.
+
+# KickTrack V6.3.4
+
+## V6.3.3 - Verkaufsflow aufgeräumt & Kickbase-Angebot in der Inbox
+
+- **Angebots-Inbox vollständig:** Die separate `ANGEBOTE`-Ansicht zeigt jetzt immer auch das aktuell verfügbare Kickbase-Sofortverkaufsangebot auf Basis des live geladenen Marktwerts sowie darunter alle Manager-Angebote aus `ofs[]`.
+- **Korrekte Write-Routen:** `Kickbase` verwendet weiterhin den verifizierten `/sell`-Pfad; Manager-Angebote verwenden ausschließlich ihren spezifischen `/offers/{offerId}/accept`-Pfad. Im UI sehen beide trotzdem wie ein einheitlicher Angebots-Posteingang aus.
+- **Doppelte Verkaufswege entfernt:** Das `LISTING`-Modal verwaltet nur noch Listenpreis und `VOM MARKT NEHMEN`. Der zusätzliche `ANGEBOTE`-Button und der separate `AN KICKBASE VERKAUFEN`-Block im Listing-Modal wurden entfernt.
+- **Klare Verantwortlichkeit:** `LISTING` = Transferlistenstatus verwalten. `ANGEBOTE` = konkrete Verkaufsmöglichkeiten prüfen/annehmen.
+- **Sekundär-roter Tabellenstil:** Kleine `LISTING`, `ANGEBOTE` und `ANNEHMEN`-Buttons verwenden jetzt einen eigenen kompakten roten Secondary-Stil statt des schwarz/grauen `CompactActionButton`.
+- **Liga-UI sprachlich bereinigt:** Der Bereich heißt jetzt `EIGENE LISTINGS` statt `EIGENE ANGEBOTE`; leere Zustände sprechen ebenfalls von Listings statt Angeboten.
+- Regressionstest verhindert, dass Kickbase-Verkauf oder Angebotsverwaltung erneut doppelt ins Listing-Modal eingebaut werden.
+
+# KickTrack V6.3.3
+
+## V6.3.2 - Markt-Detail bleibt auf geklicktem Spieler
+
+- **Rechter Markt-Detailbereich ist jetzt strikt klickgesteuert:** Nur ein bewusster Klick auf eine Spielerzeile darf den ausgewählten Spieler wechseln.
+- Die konkurrierende `itemSelectionChanged`-Verbindung wurde entfernt. Fokuswechsel, Sortierung, Current-Item-Änderungen oder bloßes Zurückfahren mit der Maus über die Tabelle überschreiben die Detailauswahl damit nicht mehr.
+- Doppelklick zum Öffnen der vollständigen Spieleransicht bleibt unverändert erhalten.
+
+# KickTrack V6.3.2
+
+## V6.3.1 - saubere Line-Arrows für Dynamik
+
+- **Dynamik-Symbole neu aufgesetzt:** Die bisherigen Icons waren trotz V6.3.0 noch nicht im gewünschten Stil. KickTrack verwendet jetzt ein **einheitliches, sauberes Line-Arrow-/Chevron-Set** statt gemischter Font-Awesome-Glyphen.
+- **Keine gemischten Metaphern mehr:** Alle Zustände basieren jetzt auf derselben Geometrie (45°-Linien, Chevron/Doppelt-Chevron, klare Arrow-Heads). Dadurch wirken Legende und Tabellenspalte endlich wie aus einem Guss.
+- **Trendwenden bleiben getrennt:** `Wende ↑` zeigt eine klare V-förmige Aufwärtswende, `Wende ↓` die gespiegelte Abwärtswende.
+- **Kein QtAwesome mehr nötig:** Die Trendicons werden wieder direkt im Client gezeichnet, aber diesmal bewusst im Stil gängiger Outline-Arrow-Packs. Die zusätzliche `qtawesome`-Dependency entfällt damit wieder.
+
+# KickTrack V6.3.1
+
+## V6.3.0 - Transfer-Aktionen, Angebots-Inbox & MW-Chart-Zoom
+
+- **Transfer-Aktionen getrennt:** Spieler-Detail zeigt `AUF MARKT`, bestehende Listings `LISTING` und `ANGEBOTE` als eigenständige Aktionen. Der Transfermarkt hat zusätzlich pro Zeile einen kompakten `BIETEN`-Button.
+- **Eigene Listings:** In der Listing-Tabelle sind `LISTING` und `ANGEBOTE` getrennte kleine Buttons statt eines Sammel-Buttons.
+- **Angebots-Inbox:** Neues Modal listet alle eingehenden Manager-Angebote mit Manager, Preis, Δ zum Marktwert und einem eigenen `ANNEHMEN`-Button pro Angebot. Vor der Annahme erscheint eine explizite Bestätigung.
+- **Live Offer State:** Angebote werden gezielt über den Player-Transfer-State geladen; Manager-Angebote verwenden die offer-spezifischen Accept-/Decline-Endpunkte.
+- **MW-Graph genauer inspizieren:** Rechteck-Zoom per Maus sowie direkte Bereiche `7T`, `30T`, `90T`, `1J`, `ALLES` und `ZOOM RESET`. Die Y-Achse passt sich an den sichtbaren Zeitraum an.
+- **Standard-Icons statt Custom-Glyphen:** Dynamik verwendet jetzt QtAwesome/Font Awesome 6 mit farbigen Standard-Icons. Trendwende aufwärts und abwärts besitzen ausdrücklich unterschiedliche Symbole (`arrow-turn-up` / `arrow-turn-down`).
+- `qtawesome>=1.4.0` wurde als Release-Abhängigkeit ergänzt.
+- Regressionstests sichern Angebots-Endpunkte, Angebots-Modal, getrennte Tabellenaktionen, Chart-Zoom und Icon-Pack-Mapping ab.
+
+# KickTrack V6.3.0
+
+## V6.2.19 - getrennte Trendwenden
+
+- Der bisherige gemeinsame `TURNING`-Status wurde in **WENDE AUFWÄRTS** und **WENDE ABWÄRTS** getrennt.
+- Aufwärtswende erhält ein klares V-förmiges Recovery-Symbol mit aufwärts gerichtetem Pfeil; Abwärtswende das gespiegelte Peak-Symbol mit Abwärtspfeil.
+- Beide Wenden haben eigene Farben/Semantik: Aufwärtswende positiv/grün, Abwärtswende negativ/rot.
+- Markt-, Kader-, Detail- und Facts-First-Logik verwenden die neuen Codes konsistent; eine Abwärtswende kann weiterhin ein Verkauf-/Warnsignal auslösen, eine Aufwärtswende nicht.
+- Regressionstest stellt sicher, dass reale fallend→steigend- und steigend→fallend-Verläufe unterschiedlich klassifiziert werden.
+
+# KickTrack V6.2.19
+
+## V6.2.18 - Rollen-Regression behoben + Release-Gate
+
+- **Rollen-Dropdown im Kader wieder repariert:** Der funktionierende Popup-Menü-Pfad aus V6.2.15 ist wiederhergestellt. Ein Klick auf den Rollen-Chip öffnet direkt das kompakte `QMenu`; kein `QComboBox`-Editor und kein zweiter Klick.
+- **Ursache der Regression behoben:** Ein späterer Hotfix hatte `ui_components.py` aus einem älteren Zwischenstand ausgeliefert und damit den Rollen-Delegate zurückgedreht, während `dashboard_squad_mixin.py` bereits den neuen Menü-Pfad erwartete.
+- **Regressionstest verschärft:** Die Architekturtests verlangen jetzt explizit `open_role_menu()`, `QMenu` und den direkten Klickpfad und verbieten den alten `createEditor()`-/`editItem()`-Mechanismus.
+- **Hotfixes werden ab jetzt aus einem einzigen kumulativen Arbeitsstand erzeugt.** Keine Datei wird mehr aus einem älteren Hotfix-Verzeichnis zurückkopiert.
+
+# KickTrack V6.2.18
+
+## V6.2.17 - Standardnähere Dynamik-Glyphen
+
+- Die Dynamik-Symbole wurden erneut ersetzt, diesmal **deutlich sichtbarer**.
+- Statt individueller Kreis-/Kurvenmarks nutzt KickTrack jetzt klare, paketartige Arrow-/Chevron-Glyphen im Stil typischer UI-Iconsets.
+- Beschleunigend = Doppel-Chevron, stabil = einfache Richtungs-Pfeile, Seitwärts = Horizontal-Pfeil, Trendwende/Erholung = eindeutige Knick-/Recovery-Formen.
+- Farben, Mapping und Legende bleiben gleich; der Look ist aber absichtlich generischer und standardnäher.
+
+# KickTrack V6.2.17
+
+## V6.2.16 - Markt-Loading, ligatypischer Preis & Trend-Icons
+
+- **Force-Refresh im Markt bereinigt:** Beim Laden werden alte Zell-Widgets jetzt vor dem Skeleton explizit entfernt, Tooltips verborgen und die Tabelle bis zum Abschluss deaktiviert. Dadurch erscheinen keine gemischten Zustände aus alten Spielernamen und Skeleton-Balken mehr.
+- **Loading-Skeleton blockiert Interaktion bewusst:** Während des Markt-Loads fängt das Overlay Hover- und Klick-Events ab, damit keine alten Tooltips oder versehentliche Klicks durchrutschen.
+- **Ligatypischer Preis zurückgebracht:** Im Markt-Detail zeigt `LIGATYP. PREIS` wieder einen aus historischen Liga-Overpays/Premiums abgeleiteten Zielpreis. Falls dafür noch zu wenig Daten vorliegen, wird sauber auf den spielerbezogenen Deal-Median zurückgefallen.
+- **Trend-Icons neu gezeichnet:** Die bisherigen sehr organischen Kurven wurden durch klarere, standardnähere Chart-/Arrow-Polylines ersetzt. Farben und Legende bleiben konsistent, die Symbole wirken aber technischer und weniger „AI-mäßig“.
+
+# KickTrack V6.2.16
+
+## V6.2.12 - Rollen-Dropdown per Einzelklick
+
+- Rollenfeld im Kader öffnet sein Dropdown jetzt direkt beim ersten Klick.
+- Der transiente `QComboBox`-Editor wird nach dem Einsetzen durch Qt im nächsten Event-Loop-Tick automatisch aufgeklappt; ein zweiter Klick auf den bereits sichtbaren Editor ist nicht mehr nötig.
+- Die sortierstabile Delegate-Lösung aus V6.2.10/V6.2.11 bleibt unverändert erhalten.
+
+# KickTrack V6.2.12
+
+## V6.2.11 - Kader- und Player-Detail-Hotfix
+
+- Fehlenden `MUTED`-Import im Kader behoben; neutrale MW-Dynamiken brechen das Tabellen-Rendering nicht mehr mit `NameError` ab.
+- Fehlenden direkten Import von `open_player_detail_window` in `manager_dialogs.py` ergänzt; Player Details aus Manager-Kader und Transferhistorie öffnen wieder.
+- Kader-Detailtabelle rendert jetzt atomar: sämtliche Zeilen werden zunächst vollständig vorbereitet und erst danach in einem Schritt in die sichtbare Tabelle übernommen. Ein fehlerhafter optionaler Datenwert kann die bestehende Tabelle dadurch nicht mehr leeren oder halb befüllt zurücklassen.
+- Native Qt-Sortierung mit transientem Rollen-Editor bleibt erhalten; der aktuell gewählte Sortierindikator wird nach einem Refresh wieder angewendet.
+- Fehler beim Laden gecachter 22-Uhr-Prognosen bzw. beim Facts-First-Enrichment werden nicht mehr lautlos verschluckt, sondern als `[WARN]` protokolliert.
+- Regressionstests sichern die für diese Fehler relevanten Imports und den atomaren Render-Pfad ab.
+
+# KickTrack V6.2.11
+
+## V6.2.10 - stabile Kader-Sortierung
+
+- Kader-Tabelle wieder auf echte Qt-Zeilensortierung zurückgeführt.
+- Persistente Rollen-Comboboxen aus der sortierbaren Tabelle entfernt; Rolle ist nun ein normales Tabellenitem mit transientem Editor.
+- Dadurch können beim Sortieren keine Spielerzeilen mehr teilweise verschwinden oder Widgets in falschen Zeilen landen.
+- Rollenbearbeitung bleibt direkt in der Tabelle möglich.
+
+# KickTrack V6.2.10
+
+### V6.2.9 – Kader-Tabelle stabilisiert
+
+- Die native `QTableWidget`-Sortierung ist im Kader deaktiviert, weil persistente Rollen-Comboboxen beim Sortieren nicht zuverlässig mit den Spielerzeilen mitwandern.
+- Header-Klicks sortieren jetzt ausschließlich die bereits vollständig analysierte Spielerliste und bauen danach die 14–18 leichten UI-Zeilen neu auf – ohne API- oder Modellaufrufe.
+- Vor jedem Rendern werden alte Cell-Widgets über `setRowCount(0)` vollständig entfernt; damit können keine verwaisten Rollenfelder mehr in falschen Zeilen landen.
+- Jede Spielerzeile wird erst komplett vorbereitet und anschließend eingesetzt. Fehlende oder ungültige Wende-Prognosen ergeben sauber `UNSICHER`, statt eine halbe Zeile wie zuvor bei Köbbing zu hinterlassen.
+- Dynamik-Icons, Legende und Tooltips bleiben unverändert erhalten.
+
+
+### V6.2.8 – Kader-Tabelle auf bewährten Stand zurückgesetzt
+
+- Kader-Tabellenmechanik auf den stabilen Pre-V6.2.7-Pfad zurückgesetzt (wie in V6.1.5): native Qt-Sortierung, während des Befüllens deaktiviert und erst nach vollständigen Zeilen wieder aktiviert.
+- Experimentelle manuelle Header-Sortierung aus V6.2.7 vollständig entfernt.
+- Facts-First-Spalten, Dynamik-Icons, Legende, Tooltips und die volle Kaderhöhe bleiben erhalten.
+- Fehlende/ungültige Wende-Daten werden defensiv als `UNSICHER` behandelt, damit einzelne Spielerzeilen nicht mehr halb gerendert werden.
+
+### V6.2.7 – stabile Kaderzeilen & Sortierung
+
+- Kader-Detailansicht nutzt eine eigene Header-Sortierung statt Qt-Native-Sort mit Zell-Widgets. Dadurch bleiben Rollen-Combobox, Wende und Aktion immer beim richtigen Spieler.
+- Unvollständige/verschobene letzte Zeilen wie bei Köbbing werden durch vollständiges Neu-Rendern der bereits geladenen Spielerliste vermieden.
+- Alle Kader-Spalten sind wieder per Header klickbar sortierbar; erneuter Klick wechselt auf-/absteigend.
+- Dynamik-Tooltips nennen jetzt zuerst explizit die Bedeutung des Symbols (z. B. `Dynamik: Trendwende`) und danach Begründung/letzte Schritte.
+
 
 
 **Private Kickbase Analytics · Preseason + Season Command Center für Windows**
@@ -10,6 +155,78 @@ KickTrack automatisiert keine Transfers. Schreibende Aktionen wie ein Gebot werd
 ---
 
 ## Aktueller Stand
+
+
+### V6.2.6 – Kaderliste & Dynamik-Legende
+
+- **Kader-Detailansicht zeigt den kompletten Kader:** Die Tabellenhöhe wird direkt aus der echten Zeilenzahl berechnet (bis 18 Spieler). Der äußere Seiten-Scroll bleibt der einzige vertikale Scrollbereich. Ein Fehler beim späteren Befüllen einzelner Zellen kann die Tabelle nicht mehr auf drei sichtbare Zeilen zusammenschrumpfen.
+- **Dynamik-Symbole werden sichtbar erklärt:** Markt und Kader zeigen oberhalb der Tabelle eine kompakte Legende mit exakt denselben CI-Vektoricons wie in der Spalte (Beschleunigend, stabil steigend, verlangsamend, Trendwende, seitwärts, Erholung, fallend, beschleunigt fallend).
+- Die Zellen selbst bleiben bewusst icon-only; detaillierte Spielerwerte stehen weiterhin im Hover-Tooltip.
+
+
+### V6.2.5 – UI polish: Trend-Tooltips & Kader-Fokus
+
+- Markt-Trendicons zeigen wieder echte Tooltips mit Dynamik, letzten MW-Schritten und Wende-Prognose.
+- Die `DYNAMIK`-Spalte im Transfermarkt ist breit genug für den vollständigen Header; die Zellen bleiben reine Icons.
+- Der Kader-Tab priorisiert die Detailtabelle stärker: kompaktere Startelf-Vorschau, Detailtabelle direkt unter dem Spielfeld und Bank/Status danach; ein leerer Kaderstatus-Block entfällt komplett.
+- Die Kader-Detailtabelle behält weiterhin alle bis zu 18 Spieler im Seiten-Scroll und erhält einen klaren Mindestbereich.
+
+### V6.2.4 – schneller Full-Load & echte Trend-Icons
+
+- Das Markt-Skeleton bleibt bewusst bis zum **vollständig angereicherten** Datensatz sichtbar; kein progressives Einblenden halbfertiger Zeilen.
+- Die beiden teuersten Netzwerk-Fan-outs laufen parallel: fehlende exakte 24h-Werte und 365-Tage-MW-Historien überlappen zeitlich statt nacheinander zu warten.
+- Für den sichtbaren Markt werden nur die Marktspieler blockierend auf vollständige 365-Tage-Historien geprüft; unsichtbare Prediction-Pool-Spieler verlängern den Markt-Load nicht mehr. Prognosen ohne reale Historie werden weiterhin nicht erfunden.
+- Detail- und History-Fan-outs sind auf maximal acht parallele Requests begrenzt und bleiben tages-/history-gecached.
+- Die 22U-Berechnung iteriert bei vorhandenem Current-Player-Pool nur noch über tatsächlich relevante Spieler statt über jeden Spieler im historischen Kalibrierungskorpus.
+- Ein `[PERF] market enrichment ... total=...s`-Log zerlegt den echten Markt-Load in History, 24h, Analytics, Trendwende und 22U, damit verbleibende Engpässe messbar werden.
+- Die DYNAMIK-Spalte zeigt **nur noch echte gezeichnete Vektor-Icons**. Keine Unicode-/ASCII-Pfeile und kein abgeschnittener Text mehr; Erklärung und letzte MW-Schritte bleiben im Tooltip.
+- Die Icons unterscheiden Beschleunigung, stabilen Anstieg, Verlangsamung, Trendwende, Seitwärtsphase, Erholung und fallende Dynamik über eigene Kurvenformen und die bestehende KickTrack-Semantikfarbe.
+
+
+### V6.2.3 – Skeleton zurück & CI-Trendsymbole
+
+- Transfermarkt-Skeleton bleibt wieder sichtbar, bis Status, echte 24h-Werte, MW-Historie und Prognosen vollständig vorbereitet sind; die Arbeiten bleiben asynchron.
+- Keine halb angereicherten Marktzeilen mehr während des ersten Loads.
+- MW-Dynamiken erhielten zunächst kompakte Textsymbole; diese wurden in V6.2.4 durch gezeichnete Vektor-Icons ersetzt.
+- Trenddarstellung ist in Markt, Kader, Detailansicht und Coach konsistent und semantisch eingefärbt.
+
+
+### V6.2.2 – schneller Tabwechsel, progressiver Markt & vollständige 24h-Werte
+
+- Markt zeigt die bereits geladenen Grunddaten direkt nach dem eigentlichen Market-Request; Status, 24h-Fallback, Historie und Predictions laufen danach weiter im Hintergrund.
+- Fehlende exakte 24h-Werte werden gezielt über den Spieler-Detail-Endpunkt nachgeladen und für den Tag gecacht.
+- Kader/League/Transfers/Analyse/Coach werden beim reinen Tabwechsel nicht mehr unnötig erneut berechnet, solange die zugrunde liegenden Daten nicht invalidiert wurden.
+- Der Kader verwendet den im Markt-Worker bereits aufgebauten Trendwende-Referenzcache und scannt beim Öffnen nicht mehr die komplette Marktwert-Historie.
+- Sync und Ligawechsel invalidieren die betroffenen Seiten kontrolliert; danach wird nur der sichtbare Bereich neu geladen.
+
+### V6.2.1 – Responsiveness-Hotfix nach Facts First
+
+- Die im Log sichtbare `QPainter`-Fehlerschleife wurde behoben: Das Skeleton verwendet keine `QGraphicsOpacityEffect`-Kaskade mehr. Base- und Pulse-Layer werden in genau einem Paint-Pass aus gecachten Pixmaps zusammengesetzt.
+- Startup und Ligawechsel refreshen nur noch die **aktuell sichtbare Seite**. Kader, Markt, Liga, Transfers, Analyse und Coach werden lazy beim Öffnen geladen statt alle gleichzeitig beim Login.
+- Die Trendwende-Kalibrierung wird pro Refresh nur noch **einmal** aus der gesamten MW-Historie aufgebaut und anschließend für alle Spieler wiederverwendet. Zuvor wurde dieselbe historische Stichprobe für jeden Spieler erneut erzeugt.
+- Auch die 22U-Kalibrierung indexiert historische Vergleichsfälle jetzt einmal nach Richtung und Änderungsgröße, statt für jeden Spieler den gesamten Sample-Pool mehrfach linear zu durchsuchen.
+- Der Transfers-Tab lädt MW-Historien nur noch für die dort tatsächlich benötigten Spieler statt die komplette `market_values`-Tabelle in den UI-Thread zu ziehen.
+- Die verlässlichen 365-Tage-MW-Historien aus V6.2.0 bleiben vollständig erhalten; der Patch reduziert lediglich unnötige Wiederholungsarbeit und UI-Blockaden.
+- Regressionstests verhindern künftig die problematische Graphics-Effect-Skeleton-Konstruktion und ein erneutes `refresh_all()` aller versteckten Seiten.
+- Versionsanzeigen in App, `pyproject.toml` und README auf V6.2.1 angehoben.
+
+### V6.2.0 – Facts First + verlässliche MW-Historien
+
+- Die sichtbare Entscheidungslogik wurde auf **FAKT / SIGNAL / PROGNOSE** umgestellt. Markt, Coach, Kader und Gebotsbewertung zeigen keine künstlichen 0–100-Gesamtscores mehr.
+- Der Transfermarkt ersetzt `VALUE` durch **MW-DYNAMIK**. Angezeigt werden echte Marktwert-Schritte und klare Zustände: beschleunigend, stabil steigend, verlangsamend, Trend dreht, seitwärts, Erholung, stabil fallend oder beschleunigt fallend.
+- Neu ist eine **Trendwende-Prognose** für die nächsten zwei MW-Refreshes. Sie basiert auf historisch ähnlichen echten MW-Verläufen und zeigt Risiko, Wahrscheinlichkeit und Anzahl der Vergleichsfälle. Bei zu wenig Daten wird bewusst `UNSICHER` angezeigt.
+- Vor 22U- und Trendwende-Prognosen stellt ein neuer `MarketValueHistoryService` automatisch sicher, dass für Markt, eigenen Kader und bekannte Manager-Kader reale Kickbase-Marktwert-Historien vorhanden sind. Lokale Daten, 12h-Cache und der 365-Tage-API-Endpoint werden in dieser Reihenfolge genutzt.
+- Historien werden ausschließlich aus echten Kickbase-Werten persistiert; fehlende Tage werden **nicht interpoliert oder erfunden**. Coverage und Freshness werden geprüft. Alte Scanner-/Learning-Caches bleiben kompatibel.
+- Nach einem History-Backfill werden 24h/3T/7T-Ableitungen neu aus der gespeicherten Timeline gelesen, damit Predictions und sichtbare Trends denselben Datenstand verwenden.
+- Markt-Detailansicht zeigt statt Startkader-/Trade-/Value-Balken jetzt MW-Dynamik, Wende-Prognose, Preisabweichung zum MW und den Median tatsächlich beobachteter Liga-Deals des Spielers.
+- Der Coach priorisiert weiterhin konkrete Aktionen, begründet sie aber nur noch mit sichtbaren Fakten wie MW-Schritten, Preis-vs.-MW, P/L, Rollen, Kaderplätzen und klar gekennzeichneten Prognosen. Die interne Sortierreihenfolge wird nicht mehr als `PRIO 87` o. Ä. angezeigt.
+- Die Gebotsbewertung wurde auf Fakten reduziert: Mindestgebot, Aufpreis zum MW und Budgetanteil statt zusammengesetztem Gebots-Score. Die dokumentierte Kickbase-33%-Regel bleibt separat der verbindliche lokale Pre-Flight-Check.
+- Im Kader ersetzen `STARTKADER`-/`TRADE`-Scores die Spalten **DYNAMIK** und **WENDE**. Aktionen wie `HALTEN`, `EXIT BEOBACHTEN`, `GEWINN ABSICHERN` oder `VERKAUF PRÜFEN` werden aus Rolle + realem MW-Verlauf + P/L abgeleitet.
+- Spieler-Performance zeigt bei `SCHWANKUNG` jetzt die tatsächliche Standardabweichung der letzten Spiele statt eines abstrakten Risk-Scores.
+- Sichtbare Team-/Optimizer-Scores wurden aus den Planer-Dialogen entfernt; die Dialoge zeigen nur noch Formation, Spieler, Kosten und weitere konkrete Fakten.
+- Historien-Datumslogik verwendet für den aktuellen Tag konsistent **Europe/Berlin**, damit Tagesgrenzen rund um Mitternacht nicht zwischen Live- und History-Werten verrutschen.
+- Neue Regressionstests decken MW-Dynamik, Trendwende-Fallback, History-Fetch/Cache/Persistenz, Facts-First-Coach und scorefreie Gebotsbewertung ab.
+- Versionsanzeigen in App, `pyproject.toml` und README auf V6.2.0 angehoben.
 
 ### V6.1.5 – Smooth Pulse Skeleton
 

@@ -133,10 +133,10 @@ class KickbaseIntelligenceMixin:
             except Exception:
                 return pid, None
 
-        # Four parallel requests are enough to keep the initial load responsive
-        # while staying deliberately conservative with the unofficial API.
+        # Eight parallel detail requests keep the first complete market load below
+        # the previous 7s bottleneck while remaining bounded and cache-backed.
         if missing:
-            with ThreadPoolExecutor(max_workers=min(4, len(missing))) as pool:
+            with ThreadPoolExecutor(max_workers=min(8, len(missing))) as pool:
                 futures = [pool.submit(fetch, pid) for pid in missing]
                 for future in as_completed(futures):
                     pid, value = future.result()

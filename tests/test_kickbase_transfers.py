@@ -195,27 +195,59 @@ def test_normalize_incoming_offers_parses_manager_and_kickbase():
     client.close()
 
 
-def test_unverified_offer_writes_are_blocked_without_network(monkeypatch):
-    from app.kickbase import KickbaseClient, KickbaseError
+def test_manager_offer_writes_use_offer_specific_endpoints(monkeypatch):
+    from app.kickbase import KickbaseClient
+
+    class Response:
+        status_code = 200
+        content = b'{}'
+        text = "{}"
+
+        @staticmethod
+        def json():
+            return {}
 
     client = KickbaseClient()
     calls = []
-    monkeypatch.setattr(client.client, "post", lambda *args, **kwargs: calls.append(("POST", args, kwargs)))
-    monkeypatch.setattr(client.client, "delete", lambda *args, **kwargs: calls.append(("DELETE", args, kwargs)))
 
-    for action in (
-        lambda: client.accept_manager_offer("l1", "p1", "o1"),
-        lambda: client.decline_manager_offer("l1", "p1", "o1"),
-    ):
-        try:
-            action()
-        except KickbaseError:
-            pass
-        else:
-            raise AssertionError("Expected KickbaseError for unverified offer action")
+    def fake_post(path, **kwargs):
+        calls.append((path, kwargs))
+        return Response()
 
-    assert calls == []
+    monkeypatch.setattr(client.client, "post", fake_post)
+    client.accept_manager_offer("l1", "p1", "manager-2")
+    client.decline_manager_offer("l1", "p1", "manager-3")
+
+    assert calls == [
+        ("/v4/leagues/l1/market/p1/offers/manager-2/accept", {}),
+        ("/v4/leagues/l1/market/p1/offers/manager-3/decline", {}),
+    ]
     client.close()
+
+
+def test_player_transfer_state_reads_live_offer_payload(monkeypatch):
+    from app.kickbase import KickbaseClient
+
+    client = KickbaseClient()
+    seen = []
+
+    def fake_get(path, params=None):
+        seen.append(path)
+        return {
+            "iotm": True,
+            "mv": 5_000_000,
+            "prc": 5_300_000,
+            "ofs": [{"uoid": "m2", "unm": "Max", "prc": 5_600_000}],
+        }
+
+    monkeypatch.setattr(client, "_get_json", fake_get)
+    state = client.player_transfer_state("l1", "p1")
+    assert seen == ["/v4/leagues/l1/players/p1/transfers"]
+    assert state["is_on_market"] is True
+    assert state["offers"][0]["offer_id"] == "m2"
+    assert state["offers"][0]["price"] == 5_600_000
+    client.close()
+
 
 def test_accept_kickbase_sale_offer_uses_verified_sell_post_without_body(monkeypatch):
     from app.kickbase import KickbaseClient

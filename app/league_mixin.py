@@ -131,7 +131,8 @@ from .ui_components import (
 )
 from .dialogs import (
     ListingManagementDialog,
-    ManagerDetailDialog
+    ManagerDetailDialog,
+    OfferInboxDialog,
 )
 
 
@@ -459,121 +460,25 @@ class LeagueMixin:
             self._portfolio_summary["balance_after_commitments"] = self._cash_balance - self._active_bid_committed
         self._update_deadline_chip()
         if bids:
-            points_are_current = data.get("points_are_current") is not False
-
-            # Use the complete normalized live market as the scoring population.
-            # This is the same basis used by the Transfermarkt page, so a player's
-            # Investment-, Squad- and Max-Bid values cannot drift just because we
-            # are viewing the Budgetplaner. The own bid remains a separate input
-            # and is evaluated only by rate_bid() below.
-            score_inputs = [dict(row) for row in (data.get("market_entries") or [])]
-            if not score_inputs:
-                # Defensive fallback for older/mocked client responses. Crucially,
-                # never overwrite the listing price with our own bid.
-                for bid in bids:
-                    candidate = dict(bid)
-                    candidate["price"] = int(bid.get("price") or bid.get("market_value") or 0)
-                    candidate["own_bid"] = int(bid.get("bid") or 0)
-                    score_inputs.append(candidate)
-
-            for candidate in score_inputs:
-                player_id = candidate.get("player_id")
-                if player_id:
-                    candidate.update(self.storage.analytics(str(player_id)))
-            scored = enrich_market_entries(
-                score_inputs,
-                int(data.get("rest_without_sales") if data.get("rest_without_sales") is not None else (balance or 0)),
-                self.storage.current_players(),
-                points_are_current=points_are_current,
-                league_transfers=self.storage.league_all_manager_transfer_rows(
-                    str(league_id), since=current_season_start().isoformat()
-                ),
-            )
-            scored_by_id = {str(row.get("player_id")): row for row in scored if row.get("player_id") is not None}
             for bid in bids:
-                scored_row = scored_by_id.get(str(bid.get("player_id"))) or {}
-                bid.update({
-                    "squad_fit_score": scored_row.get("squad_fit_score"),
-                    "investment_score": scored_row.get("investment_score"),
-                    "max_bid": scored_row.get("max_bid"),
-                    "minimum_bid": scored_row.get("minimum_bid") or bid.get("market_value"),
-                    "confidence_label": scored_row.get("confidence_label"),
-                    "investment_horizon": scored_row.get("investment_horizon"),
-                })
+                market_value = int(bid.get("market_value") or 0)
+                minimum_bid = market_value
+                bid["minimum_bid"] = minimum_bid
                 bid.update(rate_bid(
                     bid=int(bid.get("bid") or 0),
-                    market_value=bid.get("market_value"),
-                    investment_score=bid.get("investment_score"),
-                    squad_fit_score=bid.get("squad_fit_score"),
+                    market_value=market_value,
                     balance=int(balance or 0) if balance is not None else None,
-                    max_bid=bid.get("max_bid"),
-                    minimum_bid=bid.get("minimum_bid"),
-                    confidence_label=bid.get("confidence_label"),
-                    investment_horizon=bid.get("investment_horizon"),
+                    minimum_bid=minimum_bid,
                 ))
-                winning = estimate_winning_price(bid.get("market_value"), getattr(self, "_league_learning", {}) or {})
-                bid["league_winning_price"] = winning.get("price")
-                bid["league_winning_premium_pct"] = winning.get("premium_pct")
-                bid["league_winning_source"] = winning.get("source")
-                bid["league_winning_sample_count"] = winning.get("sample_count")
-                league_bid = evaluate_active_bid(
-                    bid=bid.get("bid"),
-                    max_bid=bid.get("max_bid"),
-                    winning=winning,
+                # Keep the visible dashboard recommendation factual. The former
+                # Max-Bid / league-winning-price model is intentionally retired
+                # from the active-bid view under Facts First.
+                bid["bid_action"] = bid.get("bid_signal")
+                bid["bid_action_tone"] = (
+                    "negative" if bid.get("bid_signal") in {"UNTER MINDESTGEBOT", "HOHER AUFPREIS"}
+                    else "warning" if bid.get("bid_signal") == "AUFPREIS PRÜFEN"
+                    else "positive"
                 )
-                investment_history = estimate_investment_outcome(
-                    market_value=bid.get("market_value"),
-                    d3=scored_row.get("d3"),
-                    d7=scored_row.get("d7"),
-                    learning=getattr(self, "_league_learning", {}) or {},
-                )
-                premium_history = evaluate_premium_outcome(
-                    bid=bid.get("bid"),
-                    market_value=bid.get("market_value"),
-                    learning=getattr(self, "_league_learning", {}) or {},
-                )
-                league_bid = calibrate_bid_action(
-                    league_bid, investment_outcome=investment_history, premium_outcome=premium_history
-                )
-                bid.update(league_bid)
-                bid["historical_investment"] = investment_history
-                bid["historical_premium"] = premium_history
-                if winning.get("price"):
-                    gap = league_bid.get("league_gap")
-                    gap_text = f"{euro(abs(gap))} {'über' if gap is not None and gap >= 0 else 'unter'} Liga-Niveau" if gap is not None else ""
-                    extra = (
-                        f"\n\nLIGA-HISTORIE\nTypischer Zuschlag: {euro(winning['price'])} "
-                        f"({winning['premium_pct']:+.1f}% · {winning['source']} · n={winning['sample_count']})\n"
-                        f"Dein Gebot: {league_bid['league_chance']}"
-                        + (f" · {gap_text}" if gap_text else "")
-                        + f"\nAktion: {league_bid['bid_action']}"
-                        + "\nHistorischer Zuschlagspreis ist Kontext und erhöht den Max-Bid nicht."
-                    )
-                    profile_return = investment_history.get("median_return_7d_pct")
-                    premium_return = premium_history.get("median_return_7d_pct")
-                    if profile_return is not None:
-                        extra += (
-                            f"\nMomentum-Profil {investment_history.get('profile')}: "
-                            f"{profile_return:+.1f}% Median nach 7T · "
-                            f"{investment_history.get('profitable_rate_7d', 0)*100:.0f}% profitabel · n={investment_history.get('sample_count', 0)}"
-                        )
-                    if premium_return is not None:
-                        extra += (
-                            f"\nPremium {premium_history.get('band')}: {premium_history.get('label')} · "
-                            f"{premium_return:+.1f}% Median nach 7T · n={premium_history.get('sample_count', 0)}"
-                        )
-                    if league_bid.get("historical_veto_reason"):
-                        extra += f"\nHistorischer Stop: {league_bid['historical_veto_reason']}"
-                    bid["bid_analysis_text"] = str(bid.get("bid_analysis_text") or "") + extra
-                else:
-                    extra = f"\n\nLIGA-HISTORIE\n{league_bid['league_chance']} · Aktion: {league_bid['bid_action']}"
-                    if investment_history.get("median_return_7d_pct") is not None:
-                        extra += (f"\nMomentum-Profil {investment_history.get('profile')}: "
-                                  f"{investment_history['median_return_7d_pct']:+.1f}% / 7T · n={investment_history.get('sample_count', 0)}")
-                    if premium_history.get("median_return_7d_pct") is not None:
-                        extra += (f"\nPremium {premium_history.get('band')}: {premium_history.get('label')} · "
-                                  f"{premium_history['median_return_7d_pct']:+.1f}% / 7T · n={premium_history.get('sample_count', 0)}")
-                    bid["bid_analysis_text"] = str(bid.get("bid_analysis_text") or "") + extra
         self.budget_bid_list.set_bids(bids)
         if bids:
             self.budget_status.setText(f"{len(bids)} aktiv")
@@ -671,11 +576,28 @@ class LeagueMixin:
                     set_item_delta_color(item, delta)
                     item.setToolTip(f"Aktueller Erlös minus Marktwert: {delta_text(delta)}")
                 table.setItem(r, c, item)
-            manage = QPushButton("VERWALTEN")
-            manage.setObjectName("CompactActionButton")
-            manage.setToolTip("Listenpreis ändern, vom Markt nehmen oder eingehende Angebote verwalten")
-            manage.clicked.connect(lambda _checked=False, p=dict(player): self._manage_own_listing(p))
-            table.setCellWidget(r, 10, manage)
+            action_widget = QWidget(table)
+            action_widget.setObjectName("TransparentActionCell")
+            action_widget.setAttribute(Qt.WA_StyledBackground, True)
+            action_layout = QHBoxLayout(action_widget)
+            action_layout.setContentsMargins(2, 3, 2, 3)
+            action_layout.setSpacing(4)
+
+            listing_btn = QPushButton("LISTING")
+            listing_btn.setObjectName("CompactDangerActionButton")
+            listing_btn.setToolTip("Listenpreis ändern oder Spieler vom Markt nehmen")
+            listing_btn.clicked.connect(lambda _checked=False, p=dict(player): self._manage_own_listing(p))
+
+            manager_offer_count = int(player.get("offer_count") or len(player.get("incoming_offers") or []) or 0)
+            offer_count = manager_offer_count + (1 if mv > 0 else 0)
+            offers_btn = QPushButton(f"ANGEBOTE {offer_count}" if offer_count else "ANGEBOTE")
+            offers_btn.setObjectName("CompactDangerActionButton")
+            offers_btn.setToolTip("Kickbase- und Manager-Angebote anzeigen und einzeln annehmen")
+            offers_btn.clicked.connect(lambda _checked=False, p=dict(player): self._open_own_listing_offers(p))
+
+            action_layout.addWidget(listing_btn)
+            action_layout.addWidget(offers_btn)
+            table.setCellWidget(r, 10, action_widget)
         table.setSortingEnabled(True)
         table.setVisible(bool(rows))
         self.own_listings_empty.setVisible(not rows)
@@ -685,8 +607,17 @@ class LeagueMixin:
             header_h = table.horizontalHeader().height() if table.horizontalHeader().isVisible() else 0
             table.setFixedHeight(header_h + len(rows) * row_h + 6)
         else:
-            self.own_listings_summary.setText("KEINE ANGEBOTE")
+            self.own_listings_summary.setText("KEINE LISTINGS")
             table.setFixedHeight(0)
+
+    def _open_own_listing_offers(self, player: dict) -> None:
+        league_id = str(self.league_combo.currentData() or self.storage.get_setting("league_id") or "")
+        if not league_id:
+            QMessageBox.warning(self, "Angebote", "Keine aktive Liga ausgewählt.")
+            return
+        OfferInboxDialog(
+            self, self.client, league_id, player, refresh_callback=self._refresh_after_sale_write
+        ).exec()
 
     def _manage_own_listing(self, player: dict) -> None:
         league_id = str(self.league_combo.currentData() or self.storage.get_setting("league_id") or "")

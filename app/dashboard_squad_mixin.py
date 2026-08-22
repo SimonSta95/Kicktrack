@@ -84,6 +84,7 @@ from .ui_v4_components import (
     TradeCycleCard,
 )
 from .mv_prediction import build_predictions
+from .market_value_insights import TREND_LABELS, analyze_market_value_trend, build_reversal_reference, predict_trend_reversal, facts_first_squad_action, trend_display, trend_tone
 from .performance_chart import PerformanceMatchBarsWidget
 from .market_analysis import enrich_market_entries, financing_scenarios
 from .bid_analysis import rate_bid
@@ -91,9 +92,8 @@ from .bidding import calculate_bid_capacity
 from .selling import listing_price_for_percent
 from .squad_analysis import enrich_squad_entries
 from .coach_analysis import build_coach_recommendations
-from .portfolio_analysis import analyze_portfolio
 from .transfer_evaluation import evaluate_trade_cycles, transfer_evaluation_summary
-from .preseason_tools import add_value_scores, optimize_starting_squad
+from .preseason_tools import optimize_starting_squad
 from .squad_rules import MAX_SQUAD_SIZE, active_bid_count, squad_capacity
 from .player_master import sync_player_master, sync_missing_portraits, cache_review_candidate
 from .league_learning import (
@@ -108,6 +108,8 @@ from .intelligence import (
 
 
 from .ui_components import (
+    MarketTrendIconDelegate,
+    MUTED,
     POSITION_SORT,
     ROLE_LABELS,
     ROLE_SORT,
@@ -235,15 +237,23 @@ class DashboardSquadMixin:
 
         market_candidates = [
             row for row in (getattr(self, "_market_rows", []) or [])
-            if str(row.get("verdict") or row.get("action") or "").upper() in {"KADERZIEL", "INVEST"}
+            if str(row.get("facts_signal") or row.get("verdict") or row.get("action") or "").upper() == "INTERESSANT"
         ]
         if market_candidates and not capacity.is_full and not season_active:
-            market_candidates.sort(key=lambda r: int(r.get("value_score") or r.get("trading_score") or 0), reverse=True)
+            # No synthetic market score: prefer the smallest premium to MW, then
+            # a stable/accelerating real MW trend.
+            trend_rank = {"ACCELERATING_UP": 0, "STABLE_UP": 1, "SLOWING_UP": 2}
+            market_candidates.sort(key=lambda r: (
+                float(r.get("price_delta_pct") if r.get("price_delta_pct") is not None else 999.0),
+                trend_rank.get(str((r.get("mv_trend") or {}).get("code") or ""), 9),
+                str(r.get("name") or "").casefold(),
+            ))
             best = market_candidates[0]
             name = str(best.get("name") or "Marktchance")
-            verdict = str(best.get("verdict") or best.get("action") or "CHANCE").upper()
+            verdict = str(best.get("facts_signal") or "INTERESSANT").upper()
             focus_title = f"{name}: {verdict}"
-            focus_subtitle = str(best.get("primary_reason") or best.get("analysis_text") or "Aktuell die stärkste priorisierte Marktchance.")
+            reasons = [str(x) for x in (best.get("analysis_reasons") or []) if str(x).strip()]
+            focus_subtitle = reasons[0] if reasons else "Positiver MW-Trend bei nachvollziehbarem Preis-vs.-MW-Verhältnis."
 
         self.dashboard_focus.set_content(
             title=focus_title,
@@ -347,33 +357,53 @@ class DashboardSquadMixin:
                 }
                 p["next_refresh_prediction"] = pred
                 p["next_refresh_delta"] = pred.get("delta")
-        except Exception:
-            pass
+        except Exception as exc:
+            print(f"[WARN] squad prediction cache load failed: {exc}")
         players = enrich_squad_entries(
             players,
             points_are_current=points_are_current,
             market_rows=market_context,
             available_budget=current_budget,
         )
-        # The Kader page uses the same preseason action language as the Coach.
-        # Legacy sell/squad scores remain internal inputs, not competing UI outputs.
+        # Facts First: squad actions use the real MW timeline, the user's role,
+        # open P/L and a separately labelled reversal prediction. No aggregate
+        # squad/trading score is used for the visible recommendation.
         try:
-            _unused_market, players, _unused_summary = analyze_portfolio(
-                [],
-                players,
-                available_budget=int(getattr(self, "_cash_balance", current_budget or 0) or 0),
-                season_started=self._season_mode_active(),
-                committed_budget=int(getattr(self, "_active_bid_committed", 0) or 0),
-            )
-        except Exception:
-            pass
+            # Do not scan the complete market-value table on every Kader click.
+            # The expensive historical reference is built once by the market worker
+            # and reused here. Without it the current trend remains available and
+            # the reversal forecast degrades explicitly to UNSICHER.
+            reversal_reference = list(getattr(self, "_reversal_reference_cache", []) or [])
+            for player in players:
+                pid = str(player.get("player_id") or "")
+                history = self.storage.all_history(pid) if pid else []
+                trend = analyze_market_value_trend(
+                    history,
+                    market_value=int(player.get("market_value") or 0),
+                    current_delta=player.get("d1"),
+                )
+                reversal = predict_trend_reversal(
+                    (),
+                    history,
+                    market_value=int(player.get("market_value") or 0),
+                    current_delta=player.get("d1"),
+                    reference_samples=reversal_reference,
+                )
+                action, reasons = facts_first_squad_action(player, trend, reversal)
+                player["mv_trend"] = trend
+                player["trend_reversal_prediction"] = reversal
+                player["facts_action"] = action
+                player["action"] = action
+                player["analysis_reasons"] = reasons
+        except Exception as exc:
+            print(f"[WARN] squad facts-first enrichment failed: {exc}")
 
         if hasattr(self, "squad_quality_card"):
             roles = [str(p.get("player_role") or "OFFEN").upper() for p in players]
             self.squad_quality_card.value_label.setText(str(sum(1 for r in roles if r == "STAMM")))
             self.squad_core_card.value_label.setText(str(sum(1 for r in roles if r == "INVEST")))
             self.squad_invest_card.value_label.setText(str(sum(1 for r in roles if r == "TRANSFERLISTE")))
-            self.squad_sell_card.value_label.setText(str(sum(1 for p in players if p.get("action") in {"VERKAUFEN", "VERKAUF WARTEN"})))
+            self.squad_sell_card.value_label.setText(str(sum(1 for p in players if p.get("action") in {"VERKAUF PRÜFEN", "GEWINN ABSICHERN", "VERKAUF BEOBACHTEN", "EXIT BEOBACHTEN"})))
 
         if hasattr(self, "squad_pitch"):
             self.squad_pitch.set_players(players, self.storage.portrait_path)
@@ -391,8 +421,13 @@ class DashboardSquadMixin:
             self.squad_status_table.setRowCount(len(affected))
             row_h = max(40, self.squad_status_table.verticalHeader().defaultSectionSize())
             visible_rows = min(3, len(affected))
+            # Do not spend a full panel on the common "Alles verfügbar" case.
+            # The compact summary remains available in the surrounding squad UI
+            # only when there is something that actually needs attention.
+            if hasattr(self, "squad_status_panel"):
+                self.squad_status_panel.setVisible(bool(affected))
             self.squad_status_table.setVisible(bool(affected))
-            self.squad_status_empty.setVisible(not affected)
+            self.squad_status_empty.setVisible(False)
             if affected:
                 self.squad_status_table.setFixedHeight(visible_rows * row_h + 4)
                 for r, player in enumerate(affected):
@@ -419,42 +454,66 @@ class DashboardSquadMixin:
                         self.squad_status_table.setItem(r, c, item)
             self.squad_status_table.setSortingEnabled(True)
 
-        self.squad_table.setSortingEnabled(False)
-        self.squad_table.setRowCount(len(players))
-        for row, player in enumerate(players):
-            trend_source = player["d3"] if player["d3"] is not None else player["d1"]
-            trend = "→" if not trend_source else ("↗" if trend_source > 0 else "↘")
-            role = (player.get("player_role") or "OFFEN").upper()
+        self._render_squad_detail_rows(players)
+
+    def _render_squad_detail_rows(self, players: list[dict]) -> None:
+        table = self.squad_table
+        header = table.horizontalHeader()
+        sort_column = header.sortIndicatorSection()
+        sort_order = header.sortIndicatorOrder()
+        sorting_was_enabled = table.isSortingEnabled()
+
+        # Build the complete replacement off-table first. If one optional value is
+        # malformed, the currently visible table remains intact instead of being
+        # cleared and left half-populated.
+        staged_rows: list[list[QTableWidgetItem]] = []
+        for player in players:
+            role = str(player.get("player_role") or "OFFEN").upper()
+            trend_info = player.get("mv_trend") if isinstance(player.get("mv_trend"), dict) else {}
+            reversal = player.get("trend_reversal_prediction") if isinstance(player.get("trend_reversal_prediction"), dict) else {}
+            action = str(player.get("facts_action") or player.get("action") or "KEINE KLARE EMPFEHLUNG")
+            probability = reversal.get("probability")
+            try:
+                probability_value = float(probability) if probability is not None else None
+            except (TypeError, ValueError):
+                probability_value = None
+
             specs = [
-                (player["name"], player["name"]),
-                (player["club"] or "–", player["club"] or "", club_icon(player["club"])),
-                (player["position"], POSITION_SORT.get(player["position"], 99)),
+                (str(player.get("name") or "–"), str(player.get("name") or "")),
+                (str(player.get("club") or "–"), str(player.get("club") or ""), club_icon(player.get("club"))),
+                (str(player.get("position") or "–"), POSITION_SORT.get(player.get("position"), 99)),
                 (ROLE_LABELS.get(role, role), ROLE_SORT.get(role, 99)),
-                (euro(player["market_value"]), player["market_value"]),
-                (delta_text(player["d1"], compact=True), player["d1"] if player["d1"] is not None else -10**18),
+                (euro(player.get("market_value")), player.get("market_value") if player.get("market_value") is not None else -10**18),
+                (delta_text(player.get("d1"), compact=True), player.get("d1") if player.get("d1") is not None else -10**18),
                 (delta_text(player.get("next_refresh_delta"), compact=True), player.get("next_refresh_delta") if player.get("next_refresh_delta") is not None else -10**18),
-                (delta_text(player["pnl"], compact=True), player["pnl"] if player["pnl"] is not None else -10**18),
-                (player.get("kader_label") or self._score_label(player.get("squad_value_score")), int(player.get("squad_value_score") or 0)),
-                (player.get("trade_label") or self._score_label(player.get("trading_score")), int(player.get("trading_score") or 0)),
-                (player.get("action") or "HALTEN", int(player.get("squad_value_score") or 0)),
+                (delta_text(player.get("pnl"), compact=True), player.get("pnl") if player.get("pnl") is not None else -10**18),
+                ("", str(trend_info.get("code") or "UNKNOWN")),
+                (
+                    f"{str(reversal.get('risk') or 'UNSICHER')} {probability_value * 100:.0f}%"
+                    if probability_value is not None else "UNSICHER",
+                    probability_value if probability_value is not None else -1.0,
+                ),
+                (action, action.casefold()),
             ]
+
+            items: list[QTableWidgetItem] = []
             for col, spec in enumerate(specs):
                 text, sort_value = spec[0], spec[1]
                 icon = spec[2] if len(spec) > 2 else None
                 item = table_item(text, sort_value, icon=icon)
-                item.setData(Qt.UserRole, player["player_id"])
+                item.setData(Qt.UserRole, str(player.get("player_id") or ""))
                 item.setTextAlignment(Qt.AlignLeft | Qt.AlignVCenter if col in (0, 1) else Qt.AlignCenter)
                 if col == 0:
                     item.setToolTip(player_status_tooltip(player))
                 if col == 1 and icon is not None and not icon.isNull():
-                    item.setToolTip(player["club"] or "")
+                    item.setToolTip(str(player.get("club") or ""))
                 if col == 4:
                     item.setToolTip(market_value_tooltip(player))
                 elif col == 5:
-                    set_item_delta_color(item, player["d1"])
-                    item.setToolTip(change_tooltip("24h Änderung", player["market_value"], player["d1"], exact=True))
+                    set_item_delta_color(item, player.get("d1"))
+                    item.setToolTip(change_tooltip("24h Änderung", player.get("market_value"), player.get("d1"), exact=True))
                 elif col == 6:
-                    pred = player.get("next_refresh_prediction") or {}
+                    pred = player.get("next_refresh_prediction") if isinstance(player.get("next_refresh_prediction"), dict) else {}
                     set_item_delta_color(item, pred.get("delta"))
                     if pred.get("delta") is not None:
                         item.setToolTip(
@@ -464,48 +523,85 @@ class DashboardSquadMixin:
                             f"Basis: {pred.get('confidence', 'UNSICHER')} · n={pred.get('sample_count', 0)}"
                         )
                 elif col == 7:
-                    set_item_delta_color(item, player["pnl"])
+                    set_item_delta_color(item, player.get("pnl"))
                     item.setToolTip(market_value_tooltip(player))
-                elif col in (8, 9, 10):
-                    item.setToolTip(player.get("squad_analysis_text") or "")
-                self.squad_table.setItem(row, col, item)
+                elif col == 8:
+                    code = str(trend_info.get("code") or "UNKNOWN")
+                    item.setData(Qt.UserRole + 2, code)
+                    tone = trend_tone(code)
+                    if tone == "positive":
+                        item.setForeground(QColor("#38D98A"))
+                    elif tone == "warning":
+                        item.setForeground(QColor("#F3A847"))
+                    elif tone == "negative":
+                        item.setForeground(QColor("#FF5A5F"))
+                    else:
+                        item.setForeground(MUTED)
+                    label = str(trend_info.get("label") or TREND_LABELS.get(code) or TREND_LABELS["UNKNOWN"])
+                    tooltip = f"Dynamik: {label}\n{str(trend_info.get('reason') or 'Noch zu wenig MW-Historie.')}"
+                    if trend_info.get("steps_text"):
+                        tooltip += f"\nLetzte Schritte: {trend_info.get('steps_text')}"
+                    item.setToolTip(tooltip)
+                elif col == 9:
+                    item.setToolTip(str(reversal.get("reason") or "Noch zu wenig historische Vergleichsfälle."))
+                elif col == 10:
+                    reasons = player.get("analysis_reasons")
+                    if isinstance(reasons, (list, tuple)):
+                        item.setToolTip("\n".join(str(x) for x in reasons if str(x).strip()))
+                items.append(item)
 
-            # Keep the role selector visually compact inside the table cell.
-            # QTableWidget stretches a cell widget to the full column width; using
-            # a transparent wrapper prevents the combo box from looking like a
-            # full-width input field.
-            role_cell = QWidget()
-            role_cell.setObjectName("RoleCell")
-            role_layout = QHBoxLayout(role_cell)
-            role_layout.setContentsMargins(8, 7, 8, 7)
-            role_layout.setSpacing(0)
+            role_item = items[3]
+            role_item.setFlags(role_item.flags() | Qt.ItemIsEditable)
+            role_item.setToolTip("Eigene Rolle für diesen Spieler. Anklicken zum Ändern; wird lokal gespeichert.")
+            staged_rows.append(items)
 
-            combo = QComboBox()
-            combo.setObjectName("RoleCombo")
-            combo.addItems(["OFFEN", "STAMM", "INVEST", "TRANSFERLISTE"])
-            combo.setMinimumWidth(154)
-            combo.setMaximumWidth(166)
-            combo.setFixedHeight(30)
-            combo.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
-            combo.setSizeAdjustPolicy(QComboBox.AdjustToMinimumContentsLengthWithIcon)
-            combo.setMinimumContentsLength(14)
-            combo.setCurrentText(role if role in ROLE_LABELS else "OFFEN")
-            combo.setProperty("role", combo.currentText())
-            combo.setToolTip("Eigene Rolle für diesen Spieler. Wird lokal gespeichert.")
-            combo.currentTextChanged.connect(
-                lambda new_role, pid=player["player_id"], c=combo: self._role_changed(c, pid, new_role)
-            )
+        table.setSortingEnabled(False)
+        table.setUpdatesEnabled(False)
+        try:
+            table.setRowCount(0)
+            table.setRowCount(len(staged_rows))
+            self._size_squad_detail_table(len(staged_rows))
+            for row, items in enumerate(staged_rows):
+                for col, item in enumerate(items):
+                    table.setItem(row, col, item)
+        finally:
+            table.setUpdatesEnabled(True)
+            if sorting_was_enabled:
+                table.setSortingEnabled(True)
+                if 0 <= int(sort_column) < table.columnCount():
+                    table.sortItems(int(sort_column), sort_order)
+            table.viewport().update()
+            self._size_squad_detail_table(len(staged_rows))
 
-            role_layout.addWidget(combo, 0, Qt.AlignVCenter | Qt.AlignLeft)
-            role_layout.addStretch(1)
-            self.squad_table.setCellWidget(row, 3, role_cell)
-        self.squad_table.setSortingEnabled(True)
-        # Keep every squad row visible and let PageScroll handle the page.
-        # Include header + frame padding; with the Kickbase limit this tops out
-        # at roughly 18 * 48 px and remains perfectly manageable.
-        row_height = max(40, self.squad_table.verticalHeader().defaultSectionSize())
-        header_height = self.squad_table.horizontalHeader().height() if self.squad_table.horizontalHeader().isVisible() else 0
-        self.squad_table.setFixedHeight(header_height + len(players) * row_height + 6)
+    def _edit_squad_role_cell(self, row: int, column: int) -> None:
+        if int(column) != 3:
+            return
+        index = self.squad_table.model().index(int(row), 3)
+        if not index.isValid():
+            return
+        self.squad_role_delegate.open_role_menu(self.squad_table, index)
+
+    def _size_squad_detail_table(self, row_count: int) -> None:
+        """Show the complete squad in the page scroll area, never in a tiny table."""
+        if not hasattr(self, "squad_table"):
+            return
+        table = self.squad_table
+        row_height = max(48, int(table.verticalHeader().defaultSectionSize() or 48))
+        header_height = int(table.horizontalHeader().height() or 42) if table.horizontalHeader().isVisible() else 0
+        # At least eight rows remain visible while loading/empty; with real data
+        # the exact full squad height (max 18) is used. The outer PageScroll is
+        # the only vertical scrollbar.
+        visible_rows = max(8, int(row_count or 0))
+        frame = int(table.frameWidth() or 1) * 2
+        target_height = header_height + visible_rows * row_height + frame + 4
+        table.setMinimumHeight(target_height)
+        table.setMaximumHeight(target_height)
+        table.resizeRowsToContents()
+        # Cell widgets can report smaller content heights; restore the intended
+        # consistent row rhythm after resizeRowsToContents().
+        for row in range(table.rowCount()):
+            table.setRowHeight(row, row_height)
+        table.updateGeometry()
 
     def _open_dashboard_player_detail(self, item: QTableWidgetItem) -> None:
         player_id = item.data(Qt.UserRole)

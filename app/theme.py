@@ -846,6 +846,37 @@ QPushButton#DangerSecondary {
 QPushButton#DangerSecondary:hover { background: #2B1B13; border-color: #8B4B31; }
 QPushButton#DangerSecondary:disabled { color:#7D6F68; border-color:#3B302B; background:#171412; }
 
+QWidget#TransparentActionCell {
+    background: transparent;
+    border: none;
+}
+
+QPushButton#CompactDangerActionButton {
+    min-height: 24px;
+    max-height: 24px;
+    padding: 2px 10px;
+    border-radius: 7px;
+    border: 1px solid #6A3A2A;
+    background: #211711;
+    color: #FF9A68;
+    font-size: 10px;
+    font-weight: 800;
+}
+QPushButton#CompactDangerActionButton:hover {
+    background: #2B1B13;
+    border-color: #8B4B31;
+    color: #FFC0A0;
+}
+QPushButton#CompactDangerActionButton:pressed {
+    background: #341E14;
+    border-color: #A25738;
+}
+QPushButton#CompactDangerActionButton:disabled {
+    color: #7D6F68;
+    border-color: #3B302B;
+    background: #171412;
+}
+
 QFrame#SaleDecisionPanel {
     background: #11171C;
     border: 1px solid #2B343C;

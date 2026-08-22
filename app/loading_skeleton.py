@@ -1,68 +1,18 @@
 from __future__ import annotations
 
-from PySide6.QtCore import QAbstractAnimation, QEvent, QEasingCurve, QRectF, Qt, QVariantAnimation, QPropertyAnimation
+from PySide6.QtCore import QAbstractAnimation, QEvent, QEasingCurve, QRectF, Qt, QVariantAnimation
 from PySide6.QtGui import QColor, QPainter, QPen, QPixmap
-from PySide6.QtWidgets import QGraphicsOpacityEffect, QWidget
-
-
-class _SkeletonPulseLayer(QWidget):
-    """Bright skeleton layer animated by Qt's unified animation driver.
-
-    This intentionally avoids a manually advanced shimmer band. During heavy
-    market enrichment the GUI event loop can occasionally miss timer ticks;
-    a slow opacity pulse remains visually continuous even then and is the same
-    loading pattern used by many web UI skeleton components.
-    """
-
-    def __init__(self, owner: "_AnimatedSkeletonOverlay") -> None:
-        super().__init__(owner)
-        self.owner = owner
-        self.setAttribute(Qt.WA_TransparentForMouseEvents, True)
-        self.setAttribute(Qt.WA_NoSystemBackground, True)
-        self.setAutoFillBackground(False)
-        self._opacity_effect = QGraphicsOpacityEffect(self)
-        self._opacity_effect.setOpacity(0.16)
-        self.setGraphicsEffect(self._opacity_effect)
-        self._animation = QPropertyAnimation(self._opacity_effect, b"opacity", self)
-        self._animation.setDuration(1450)
-        self._animation.setStartValue(0.12)
-        self._animation.setKeyValueAt(0.5, 0.58)
-        self._animation.setEndValue(0.12)
-        self._animation.setLoopCount(-1)
-        self._animation.setEasingCurve(QEasingCurve.InOutSine)
-        self.hide()
-
-    def start(self) -> None:
-        self.setGeometry(self.owner.rect())
-        self.show()
-        self.raise_()
-        if self._animation.state() != QAbstractAnimation.Running:
-            self._animation.start()
-
-    def stop(self) -> None:
-        self._animation.stop()
-        self.hide()
-        self._opacity_effect.setOpacity(0.16)
-
-    def paintEvent(self, event) -> None:
-        self.owner._ensure_cache()
-        pixmap = self.owner._highlight_cache
-        if pixmap.isNull():
-            return
-        painter = QPainter(self)
-        exposed = event.rect()
-        painter.drawPixmap(exposed, pixmap, exposed)
-        painter.end()
+from PySide6.QtWidgets import QWidget
 
 
 class _AnimatedSkeletonOverlay(QWidget):
-    """Cached web-style skeleton with a lightweight MUI-like pulse.
+    """Cached web-style skeleton without QGraphicsEffect recursion.
 
-    The placeholder geometry is rasterized only when its size/column layout
-    changes. Animation is delegated to Qt's unified property-animation driver
-    and only changes the opacity of a cached highlight layer. That is much less
-    sensitive to timer jitter and CPU-heavy Python workers than manually moving
-    a shimmer strip at 50/60 FPS.
+    Qt's graphics effects render their source widget through an internal painter.
+    Animating an opacity effect on a child that is itself painting cached pixmaps
+    can therefore cause overlapping QPainters on Windows.  The loading log showed
+    exactly that failure mode.  This overlay keeps one widget and one painter: the
+    base skeleton and cached highlight are composited directly in paintEvent.
     """
 
     BASE = QColor("#273039")
@@ -71,27 +21,27 @@ class _AnimatedSkeletonOverlay(QWidget):
 
     def __init__(self, parent: QWidget) -> None:
         super().__init__(parent)
+        self._pulse: QVariantAnimation | None = None
         self._fade: QVariantAnimation | None = None
-        self._opacity_effect = QGraphicsOpacityEffect(self)
-        self._opacity_effect.setOpacity(1.0)
-        self.setGraphicsEffect(self._opacity_effect)
+        self._pulse_alpha = 0.16
+        self._overlay_alpha = 1.0
         self._base_cache = QPixmap()
         self._mask_cache = QPixmap()
         self._highlight_cache = QPixmap()
         self._cache_size = None
-        self.setAttribute(Qt.WA_TransparentForMouseEvents, True)
+        # While the skeleton is visible it should also block hover/click
+        # interactions, otherwise stale row widgets can still emit tooltips or
+        # receive clicks during a force refresh.
+        self.setAttribute(Qt.WA_TransparentForMouseEvents, False)
         self.setAttribute(Qt.WA_NoSystemBackground, True)
-        self.setAttribute(Qt.WA_OpaquePaintEvent, True)
         self.setAutoFillBackground(False)
         parent.installEventFilter(self)
         self.setGeometry(parent.rect())
-        self._pulse_layer = _SkeletonPulseLayer(self)
         self.hide()
 
     def eventFilter(self, watched, event) -> bool:
         if watched is self.parentWidget() and event.type() in {QEvent.Resize, QEvent.Show}:
             self.setGeometry(self.parentWidget().rect())
-            self._pulse_layer.setGeometry(self.rect())
             self.invalidate_cache()
             self.raise_()
         return super().eventFilter(watched, event)
@@ -103,45 +53,70 @@ class _AnimatedSkeletonOverlay(QWidget):
         self._highlight_cache = QPixmap()
         if self.isVisible():
             self.update()
-            self._pulse_layer.update()
 
     def start(self) -> None:
         if self._fade is not None:
             self._fade.stop()
             self._fade = None
-        self._opacity_effect.setOpacity(1.0)
+        if self._pulse is not None:
+            self._pulse.stop()
+        self._overlay_alpha = 1.0
+        self._pulse_alpha = 0.14
         self.setGeometry(self.parentWidget().rect())
-        self._pulse_layer.setGeometry(self.rect())
         self.invalidate_cache()
         self.show()
         self.raise_()
-        self._pulse_layer.start()
+
+        pulse = QVariantAnimation(self)
+        pulse.setDuration(1450)
+        pulse.setStartValue(0.12)
+        pulse.setKeyValueAt(0.5, 0.50)
+        pulse.setEndValue(0.12)
+        pulse.setLoopCount(-1)
+        pulse.setEasingCurve(QEasingCurve.InOutSine)
+        pulse.valueChanged.connect(self._set_pulse_alpha)
+        self._pulse = pulse
+        pulse.start()
         self.update()
 
+    def _set_pulse_alpha(self, value) -> None:
+        self._pulse_alpha = float(value)
+        if self.isVisible():
+            self.update()
+
     def stop(self, *, animated: bool = True) -> None:
-        self._pulse_layer.stop()
+        if self._pulse is not None:
+            self._pulse.stop()
+            self._pulse = None
         if not self.isVisible():
             return
         if not animated:
             self.hide()
-            self._opacity_effect.setOpacity(1.0)
+            self._overlay_alpha = 1.0
             return
 
+        if self._fade is not None:
+            self._fade.stop()
         animation = QVariantAnimation(self)
-        animation.setDuration(160)
-        animation.setStartValue(1.0)
+        animation.setDuration(140)
+        animation.setStartValue(self._overlay_alpha)
         animation.setEndValue(0.0)
         animation.setEasingCurve(QEasingCurve.OutCubic)
-        animation.valueChanged.connect(lambda value: self._opacity_effect.setOpacity(float(value)))
+        animation.valueChanged.connect(self._set_overlay_alpha)
 
         def finish() -> None:
             self.hide()
-            self._opacity_effect.setOpacity(1.0)
+            self._overlay_alpha = 1.0
             self._fade = None
 
         animation.finished.connect(finish)
         self._fade = animation
         animation.start()
+
+    def _set_overlay_alpha(self, value) -> None:
+        self._overlay_alpha = float(value)
+        if self.isVisible():
+            self.update()
 
     def _ensure_cache(self) -> None:
         if self.width() <= 0 or self.height() <= 0:
@@ -158,24 +133,27 @@ class _AnimatedSkeletonOverlay(QWidget):
         base = QPixmap(size)
         base.fill(Qt.transparent)
         base_painter = QPainter(base)
-        base_painter.setRenderHint(QPainter.Antialiasing)
-        self._draw_skeleton(base_painter, mask=False)
-        base_painter.end()
+        if base_painter.isActive():
+            base_painter.setRenderHint(QPainter.Antialiasing)
+            self._draw_skeleton(base_painter, mask=False)
+            base_painter.end()
 
         mask = QPixmap(size)
         mask.fill(Qt.transparent)
         mask_painter = QPainter(mask)
-        mask_painter.setRenderHint(QPainter.Antialiasing)
-        self._draw_skeleton(mask_painter, mask=True)
-        mask_painter.end()
+        if mask_painter.isActive():
+            mask_painter.setRenderHint(QPainter.Antialiasing)
+            self._draw_skeleton(mask_painter, mask=True)
+            mask_painter.end()
 
         highlight = QPixmap(size)
         highlight.fill(Qt.transparent)
         hp = QPainter(highlight)
-        hp.fillRect(highlight.rect(), self.HIGHLIGHT)
-        hp.setCompositionMode(QPainter.CompositionMode_DestinationIn)
-        hp.drawPixmap(0, 0, mask)
-        hp.end()
+        if hp.isActive():
+            hp.fillRect(highlight.rect(), self.HIGHLIGHT)
+            hp.setCompositionMode(QPainter.CompositionMode_DestinationIn)
+            hp.drawPixmap(0, 0, mask)
+            hp.end()
 
         self._base_cache = base
         self._mask_cache = mask
@@ -204,8 +182,14 @@ class _AnimatedSkeletonOverlay(QWidget):
         if self._base_cache.isNull():
             return
         painter = QPainter(self)
+        if not painter.isActive():
+            return
         exposed = event.rect()
+        painter.setOpacity(max(0.0, min(1.0, self._overlay_alpha)))
         painter.drawPixmap(exposed, self._base_cache, exposed)
+        if not self._highlight_cache.isNull():
+            painter.setOpacity(max(0.0, min(1.0, self._overlay_alpha * self._pulse_alpha)))
+            painter.drawPixmap(exposed, self._highlight_cache, exposed)
         painter.end()
 
 
