@@ -1,0 +1,16 @@
+.manager-squad-row--interactive{
+  width:100%;
+  border:0;
+  background:transparent;
+  color:inherit;
+  font:inherit;
+  text-align:left;
+  cursor:pointer;
+}
+.manager-squad-row--interactive:hover{
+  background:rgba(255,255,255,.035);
+}
+.manager-squad-row--interactive:focus-visible{
+  outline:1px solid rgba(255,70,0,.7);
+  outline-offset:-1px;
+}

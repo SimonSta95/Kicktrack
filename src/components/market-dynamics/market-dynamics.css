@@ -1,0 +1,17 @@
+.market-dynamics__trigger{width:30px;height:30px;padding:0;border:1px solid transparent;border-radius:8px;display:inline-flex;align-items:center;justify-content:center;background:transparent;color:var(--kb-grey);cursor:pointer;transition:background .15s ease,border-color .15s ease,color .15s ease}
+.market-dynamics__trigger:hover,.market-dynamics__trigger:focus-visible{background:rgba(255,255,255,.055);border-color:rgba(222,228,236,.09);outline:none}
+.market-dynamics__trigger.tone-positive,.market-dynamics.tone-positive,.market-dynamics__icon.tone-positive{color:#4fd18b}
+.market-dynamics__trigger.tone-negative,.market-dynamics.tone-negative,.market-dynamics__icon.tone-negative{color:#ff6262}
+.market-dynamics__trigger.tone-warning,.market-dynamics.tone-warning,.market-dynamics__icon.tone-warning{color:#f5bd4f}
+.market-dynamics__trigger.tone-neutral,.market-dynamics.tone-neutral,.market-dynamics__icon.tone-neutral{color:#8f969e}
+.market-dynamics-popover{position:fixed;z-index:10020;width:270px;padding:12px;border-radius:12px;background:#1b1d21;border:1px solid rgba(222,228,236,.12);box-shadow:0 18px 44px rgba(0,0,0,.45);color:var(--kb-white);pointer-events:none}
+.market-dynamics-popover__head{display:flex;align-items:center;gap:9px}
+.market-dynamics__icon{width:30px;height:30px;border-radius:8px;display:grid;place-items:center;background:rgba(255,255,255,.045)}
+.market-dynamics-popover__head small,.market-dynamics-popover__steps small{display:block;color:var(--kb-grey);font-size:9px;letter-spacing:.08em;text-transform:uppercase}
+.market-dynamics-popover__head strong{display:block;margin-top:1px;font-size:13px}
+.market-dynamics-popover p{margin:9px 0 0;color:var(--kb-light-grey);font-size:11px;line-height:1.42}
+.market-dynamics-popover__steps{margin-top:10px;padding-top:9px;border-top:1px solid rgba(222,228,236,.07)}
+.market-dynamics-popover__steps>div{display:flex;gap:6px;flex-wrap:wrap;margin-top:5px}
+.market-dynamics-popover__steps span{font-size:10px;font-variant-numeric:tabular-nums;color:var(--kb-light-grey)}
+.market-dynamics-popover__steps span.is-positive{color:#4fd18b}.market-dynamics-popover__steps span.is-negative{color:#ff6262}
+.market-dynamics--detail{display:inline-flex;align-items:center;gap:7px}

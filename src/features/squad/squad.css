@@ -1,0 +1,377 @@
+.squad-page {
+  --squad-row-height: 52px;
+  --squad-avatar-size: 44px;
+  --squad-team-logo-size: 23px;
+  width: 100%;
+  height: 100%;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  margin: 0;
+}
+
+.squad-page__header {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 18px;
+}
+
+.squad-page__title {
+  margin: 0;
+  font-family: var(--font-display);
+  font-weight: 400;
+  font-size: clamp(48px, 3.5vw, 60px);
+  line-height: .88;
+  letter-spacing: -.025em;
+  text-transform: uppercase;
+}
+
+.squad-page__subtitle {
+  margin: 7px 0 0;
+  color: var(--kb-grey);
+  font-size: 13px;
+}
+
+.squad-page__count {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 1px;
+  padding: 8px 11px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: color-mix(in srgb, var(--surface-subtle) 92%, transparent);
+  color: var(--kb-light-grey);
+  font-size: 14px;
+  font-weight: 700;
+}
+
+.squad-page__count strong {
+  color: var(--kb-white);
+  font-variant-numeric: tabular-nums;
+}
+
+.squad-page__count small {
+  padding-left: 7px;
+  border-left: 1px solid var(--border);
+  color: var(--kb-grey);
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+}
+
+.squad-page__count.is-full small { color: var(--kb-live-red); }
+
+.squad-summary {
+  flex: 0 0 auto;
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 1px;
+  margin-top: 15px;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  overflow: hidden;
+  background: var(--border);
+}
+
+.squad-summary__item {
+  min-height: 64px;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  padding: 9px 14px;
+  background: color-mix(in srgb, var(--surface-subtle) 96%, transparent);
+}
+
+.squad-summary__item > span {
+  color: var(--kb-grey);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: .08em;
+  text-transform: uppercase;
+}
+
+.squad-summary__item strong {
+  margin-top: 4px;
+  font-family: var(--font-display);
+  font-size: 26px;
+  font-weight: 400;
+  line-height: 1;
+}
+
+.squad-toolbar {
+  flex: 0 0 auto;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+  margin-top: 9px;
+}
+
+.position-filter {
+  display: inline-flex;
+  gap: 3px;
+  padding: 2px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: color-mix(in srgb, var(--surface-subtle) 96%, transparent);
+}
+
+.position-filter button {
+  min-width: 42px;
+  height: 29px;
+  padding: 0 10px;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--kb-grey);
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.position-filter button:hover { color: var(--kb-white); background: var(--surface); }
+.position-filter button.is-active { color: var(--kb-black); background: var(--kb-white); }
+
+.squad-search {
+  width: min(310px, 30vw);
+  height: 36px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 0 11px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: color-mix(in srgb, var(--surface) 95%, transparent);
+  color: var(--kb-grey);
+}
+
+.squad-search:focus-within { border-color: var(--kb-live-red); box-shadow: 0 0 0 2px var(--focus-ring); }
+.squad-search input { width: 100%; border: 0; outline: 0; background: transparent; color: var(--kb-white); font-size: 14px; }
+.squad-search input::placeholder { color: var(--kb-grey); }
+
+/* This is the dynamic part: the table owns all remaining vertical space.
+   The page itself does not need to shrink its typography just to fit 18 rows. */
+.squad-table-frame {
+  flex: 1 1 auto;
+  min-height: 0;
+  margin-top: 7px;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  overflow: auto;
+  overscroll-behavior: contain;
+  scrollbar-gutter: stable;
+  background: color-mix(in srgb, var(--surface-subtle) 96%, transparent);
+  backdrop-filter: blur(3px);
+
+  /* Dark, unobtrusive scrollbar that stays in the Kickbase visual language. */
+  scrollbar-width: thin;
+  scrollbar-color: rgba(168, 173, 180, .34) transparent;
+}
+
+.squad-table-frame::-webkit-scrollbar {
+  width: 9px;
+  height: 9px;
+}
+
+.squad-table-frame::-webkit-scrollbar-track {
+  background: rgba(19, 20, 23, .5);
+}
+
+.squad-table-frame::-webkit-scrollbar-thumb {
+  min-height: 42px;
+  border: 2px solid transparent;
+  border-radius: 999px;
+  background: rgba(168, 173, 180, .28);
+  background-clip: padding-box;
+}
+
+.squad-table-frame::-webkit-scrollbar-thumb:hover {
+  background: rgba(255, 70, 0, .68);
+  background-clip: padding-box;
+}
+
+.squad-table-frame::-webkit-scrollbar-thumb:active {
+  background: rgba(255, 70, 0, .88);
+  background-clip: padding-box;
+}
+
+.squad-table-frame::-webkit-scrollbar-corner {
+  background: transparent;
+}
+
+.squad-table {
+  width: 100%;
+  border-collapse: collapse;
+  table-layout: fixed;
+}
+
+.squad-table th,
+.squad-table td { border-bottom: 1px solid color-mix(in srgb, var(--border) 72%, transparent); }
+
+.squad-table thead {
+  position: sticky;
+  top: 0;
+  z-index: 3;
+}
+
+.squad-table th {
+  height: 34px;
+  padding: 0 12px;
+  background: rgba(28, 31, 35, .98);
+  text-align: left;
+  box-shadow: 0 1px 0 rgba(0, 0, 0, .28);
+}
+
+.squad-table th:first-child { width: 31%; }
+.squad-table th:nth-child(2) { width: 8%; }
+
+.squad-table td {
+  height: var(--squad-row-height);
+  padding: 2px 12px;
+  color: var(--kb-light-grey);
+  font-size: 14px;
+}
+
+.squad-table tbody tr:last-child td { border-bottom: 0; }
+.squad-table tbody tr { transition: background 100ms ease; }
+.squad-table tbody tr:hover { background: rgba(255, 255, 255, .025); }
+
+.table-sort {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  border: 0;
+  padding: 0;
+  background: transparent;
+  color: var(--kb-grey);
+  font-size: 10px;
+  font-weight: 800;
+  letter-spacing: .08em;
+  text-transform: uppercase;
+}
+.table-sort svg { width: 11px; height: 11px; }
+.table-sort:not(:disabled):hover { color: var(--kb-white); }
+.table-sort:disabled { cursor: default; }
+.table-sort__idle { opacity: .35; }
+
+.player-cell { display: flex; align-items: center; gap: 11px; min-width: 0; }
+.player-cell__avatar {
+  width: var(--squad-avatar-size);
+  height: var(--squad-avatar-size);
+  flex: 0 0 var(--squad-avatar-size);
+  display: grid;
+  place-items: center;
+  overflow: hidden;
+  border: 1px solid var(--border-strong);
+  border-radius: 50%;
+  background: linear-gradient(145deg, rgba(255,255,255,.06), rgba(255,255,255,.02));
+  color: var(--kb-white);
+  font-family: var(--font-display);
+  font-size: 20px;
+}
+.player-cell__avatar img { width: 100%; height: 100%; display: block; object-fit: cover; object-position: center top; }
+.player-cell__avatar > span { display: grid; width: 100%; height: 100%; place-items: center; }
+.player-cell__identity { min-width: 0; display: flex; align-items: center; }
+.player-cell__identity-header { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.player-cell__team-logo {
+  width: var(--squad-team-logo-size);
+  height: var(--squad-team-logo-size);
+  flex: 0 0 var(--squad-team-logo-size);
+  object-fit: contain;
+  filter: drop-shadow(0 1px 2px rgba(0,0,0,.45));
+}
+.player-cell__identity strong {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--kb-white);
+  font-size: 15px;
+  font-weight: 700;
+}
+
+.position-chip {
+  display: inline-grid;
+  min-width: 32px;
+  height: 21px;
+  place-items: center;
+  border: 1px solid currentColor;
+  border-radius: 4px;
+  font-size: 9px;
+  font-weight: 800;
+}
+.position-chip--goalkeeper { color:#ff5d66; background:rgba(255,93,102,.10); }
+.position-chip--defender { color:#f2c94c; background:rgba(242,201,76,.10); }
+.position-chip--midfielder { color:#63d58a; background:rgba(99,213,138,.10); }
+.position-chip--forward { color:#66a9ff; background:rgba(102,169,255,.10); }
+.position-chip--unknown { color:var(--kb-grey); background:rgba(126,129,135,.08); }
+
+.table-number { color: var(--kb-white); font-variant-numeric: tabular-nums; white-space: nowrap; font-size: 14px; }
+.table-null { color: var(--kb-dark-grey); }
+.tone-positive { color: var(--positive) !important; }
+.tone-negative { color: var(--danger) !important; }
+.tone-neutral { color: var(--kb-white) !important; }
+
+.squad-empty { padding:30px 18px; color:var(--kb-grey); text-align:center; font-size:12px; border-top:1px solid var(--border); }
+
+.squad-slot-row { background: rgba(255,255,255,.008); }
+.squad-slot-row:hover { background: rgba(255,255,255,.014) !important; }
+.squad-slot-row td { color: var(--kb-dark-grey); }
+.squad-slot { display:flex; align-items:center; gap:9px; min-width:0; color:color-mix(in srgb,var(--kb-grey) 72%,transparent); }
+.squad-slot svg { flex:0 0 auto; opacity:.58; }
+.squad-slot span { font-size:12px; font-weight:600; }
+.squad-slot small { margin-left:auto; color:color-mix(in srgb,var(--kb-grey) 48%,transparent); font-size:9px; font-weight:700; letter-spacing:.06em; text-transform:uppercase; }
+
+/* Height is now used to tune comfort, not to force all 18 rows into view. */
+@media (min-height: 1050px) and (min-width: 1200px) {
+  .squad-page { --squad-row-height: 56px; --squad-avatar-size: 48px; --squad-team-logo-size: 25px; }
+  .squad-table td, .table-number { font-size: 15px; }
+  .player-cell__identity strong { font-size: 16px; }
+}
+
+@media (max-height: 780px) and (min-width: 901px) {
+  .squad-page { --squad-row-height: 46px; --squad-avatar-size: 39px; --squad-team-logo-size: 21px; }
+  .squad-page__title { font-size: 44px; }
+  .squad-page__subtitle { display: none; }
+  .squad-summary { margin-top: 9px; }
+  .squad-summary__item { min-height: 54px; }
+  .squad-summary__item strong { font-size: 23px; }
+  .squad-toolbar { margin-top: 6px; }
+}
+
+/* Width responsiveness: drop lower-value columns before shrinking content. */
+@media (max-width: 1280px) {
+  .squad-table th:nth-child(5), .squad-table td:nth-child(5) { display:none; }
+  .squad-table th:first-child { width:36%; }
+}
+
+@media (max-width: 1080px) {
+  .squad-page__header { gap:10px; }
+  .squad-summary { grid-template-columns:1fr 1fr; }
+  .squad-summary__item:last-child { display:none; }
+  .squad-search { width:min(260px,36vw); }
+  .squad-table th:nth-child(7), .squad-table td:nth-child(7) { display:none; }
+  .squad-table th:first-child { width:42%; }
+}
+
+@media (max-width: 900px) {
+  .squad-page { --squad-row-height: 48px; --squad-avatar-size: 40px; --squad-team-logo-size: 21px; }
+  .squad-page__header { align-items:flex-start; }
+  .squad-page__count { padding:6px 8px; font-size:12px; }
+  .squad-toolbar { flex-direction:column; align-items:stretch; }
+  .squad-search { width:100%; }
+  .squad-table { min-width:720px; }
+}
+.squad-player-row{cursor:pointer}.squad-player-row:focus-visible{outline:1px solid rgba(255,70,0,.65);outline-offset:-1px}.squad-player-row:hover td{background:rgba(255,255,255,.025)}
+
+/* First name stays inline and secondary; row height does not change. */
+.player-cell__first-name{max-width:74px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--muted-foreground);font-size:10px;font-weight:550;flex:0 1 auto}
+
+/* Player name stack: no extra row height; text is vertically centered beside the assets. */
+.player-cell__name-block{min-width:0;display:flex;flex-direction:column;justify-content:center;align-self:stretch;line-height:1.05}
+.player-cell__name-block strong{display:block;line-height:1.05}
+.player-cell__first-name{display:block;max-width:100%;margin-bottom:2px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--muted-foreground);font-size:9px;font-weight:650;line-height:1}
+
+.squad-page__header-actions{display:flex;align-items:center;gap:8px}.squad-assets-trigger{height:32px;display:inline-flex;align-items:center;gap:7px;padding:0 10px;border:1px solid var(--border);border-radius:6px;background:rgba(255,255,255,.02);color:var(--kb-light-grey);font-size:10px;font-weight:750}.squad-assets-trigger:hover{background:rgba(255,255,255,.05);color:var(--kb-white)}
+@media(max-width:980px){.squad-assets-trigger span{display:none}.squad-assets-trigger{width:32px;padding:0;justify-content:center}}

@@ -1,0 +1,37 @@
+{
+  "name": "kicktrack",
+  "private": true,
+  "version": "0.8.31",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc && vite build",
+    "preview": "vite preview",
+    "tauri": "tauri",
+    "test": "node --experimental-strip-types --test test/bid-eligibility.test.mjs"
+  },
+  "dependencies": {
+    "react": "^19.1.0",
+    "react-dom": "^19.1.0",
+    "@tauri-apps/api": "^2",
+    "@tauri-apps/plugin-opener": "^2",
+    "@tanstack/react-query": "^5.85.5",
+    "clsx": "^2.1.1",
+    "lucide-react": "^0.468.0",
+    "react-router-dom": "^7.8.2",
+    "tailwind-merge": "^3.3.1",
+    "@tanstack/react-table": "^8.21.3",
+    "@tabler/icons-react": "^3.46.0"
+  },
+  "devDependencies": {
+    "@types/react": "^19.1.8",
+    "@types/react-dom": "^19.1.6",
+    "@vitejs/plugin-react": "^4.6.0",
+    "typescript": "~5.8.3",
+    "vite": "^7.0.4",
+    "@tauri-apps/cli": "^2",
+    "@tailwindcss/vite": "^4.1.12",
+    "@types/node": "^24.3.0",
+    "tailwindcss": "^4.1.12"
+  }
+}

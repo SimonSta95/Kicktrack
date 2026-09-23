@@ -1,0 +1,42 @@
+.position-badge {
+  width: 32px;
+  min-width: 32px;
+  height: 22px;
+  box-sizing: border-box;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  border: 1px solid currentColor;
+  border-radius: 4px;
+  font-size: 9px;
+  line-height: 1;
+  font-weight: 800;
+  letter-spacing: 0;
+  white-space: nowrap;
+}
+
+.position-badge--goalkeeper {
+  color: #ff6b61;
+  background: rgba(255, 107, 97, 0.08);
+}
+
+.position-badge--defender {
+  color: #f1c84b;
+  background: rgba(241, 200, 75, 0.08);
+}
+
+.position-badge--midfielder {
+  color: #63cf83;
+  background: rgba(99, 207, 131, 0.08);
+}
+
+.position-badge--forward {
+  color: #77a9ff;
+  background: rgba(119, 169, 255, 0.08);
+}
+
+.position-badge--unknown {
+  color: var(--muted-foreground);
+  background: rgba(255, 255, 255, 0.03);
+}

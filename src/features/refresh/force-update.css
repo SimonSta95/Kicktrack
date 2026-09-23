@@ -1,0 +1,8 @@
+.force-update{display:flex;align-items:center;gap:10px;min-width:0}
+.force-update__button{display:inline-flex;align-items:center;justify-content:center;gap:8px;min-height:36px;padding:0 13px;border:1px solid rgba(255,70,0,.45);border-radius:7px;background:rgba(255,70,0,.09);color:var(--kb-white,#dee4ec);font:700 11px/1 "KB Volksans",system-ui,sans-serif;text-transform:uppercase;letter-spacing:.035em;cursor:pointer}
+.force-update__button:hover:not(:disabled){background:rgba(255,70,0,.16);border-color:rgba(255,70,0,.7)}
+.force-update__button:disabled{cursor:wait;opacity:.8}
+.force-update__error{max-width:360px;color:#ff7166;font-size:10px}
+.force-update--compact .force-update__button{min-height:32px;padding:0 10px}
+.is-spinning{animation:kicktrack-spin .85s linear infinite}
+@keyframes kicktrack-spin{to{transform:rotate(360deg)}}
