@@ -2,6 +2,14 @@
 
 Desktop-App für Kickbase auf Basis von Tauri, React und TypeScript. Das Rust-Backend kapselt Kickbase-Zugriffe, lokale Persistenz und autoritative Write-Preflights; das React-Frontend stellt Markt, Kader, Liga, Analysen und Player Detail dar.
 
+## Technischer Überblick
+
+<p align="center">
+  <img src="docs/images/kicktrack-technical-overview.png" alt="KickTrack – technischer Überblick über Architektur, Datenfluss, SQLite-Datenmodell und Hauptfunktionen" width="100%">
+</p>
+
+Die Grafik zeigt den vereinfachten Datenfluss von der Kickbase API über das Tauri-/Rust-Backend und die lokale SQLite-Persistenz bis zum React-/TypeScript-Frontend. Zusätzlich fasst sie zentrale Tabellen, Feature-Bereiche und den eingesetzten Stack zusammen.
+
 ## Aktueller Stand
 
 - Transfermarkt mit Geboten, Verkäufen, Restzeit, Marktwert-/Punktesignalen und Budgetplaner.
