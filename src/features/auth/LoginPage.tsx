@@ -13,7 +13,7 @@ export function LoginPage() {
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [showPassword, setShowPassword] = useState(false);
-  const [remember, setRemember] = useState(true);
+  const [remember, setRemember] = useState(false);
 
   const loginMutation = useMutation({
     mutationFn: () => login(email.trim(), password, remember),
@@ -69,7 +69,7 @@ export function LoginPage() {
             <p className="mb-3 text-xs font-bold uppercase tracking-[0.2em] text-[var(--kb-grey)]">KickTrack</p>
             <h2 className="font-display text-4xl font-black uppercase tracking-[-0.035em] sm:text-5xl">Anmelden</h2>
             <p className="mt-3 text-sm leading-6 text-[var(--kb-light-grey)]">
-              Verwende deine normalen Kickbase-Zugangsdaten. Dein Passwort wird nicht gespeichert.
+              Verwende deine normalen Kickbase-Zugangsdaten. Ohne Dauerlogin wird dein Passwort nicht gespeichert.
             </p>
           </div>
 
@@ -121,8 +121,9 @@ export function LoginPage() {
                 <span className="flex h-4.5 w-4.5 items-center justify-center rounded border border-[var(--border-strong)] bg-[var(--surface)] transition peer-checked:border-[var(--kb-live-red)] peer-checked:bg-[var(--kb-live-red)] peer-focus-visible:outline peer-focus-visible:outline-2 peer-focus-visible:outline-offset-2 peer-focus-visible:outline-[var(--kb-live-red)]">
                   {remember ? <Check size={13} strokeWidth={3} className="text-[var(--kb-black)]" /> : null}
                 </span>
-                Angemeldet bleiben
+                Dauerhaft angemeldet bleiben
               </label>
+              {remember ? <p className="mt-2 text-xs leading-5 text-[var(--kb-grey)]">KickTrack speichert deine Zugangsdaten geschützt im Windows Credential Manager und erneuert das wöchentlich ablaufende Kickbase-Token automatisch.</p> : null}
             </div>
 
             {loginMutation.isError ? (
@@ -148,7 +149,7 @@ export function LoginPage() {
           <div className="mt-7 flex items-start gap-3 rounded-lg border border-[var(--border)] bg-[var(--surface-subtle)] p-4">
             <LockKeyhole className="mt-0.5 shrink-0 text-[var(--kb-grey)]" size={17} />
             <p className="text-xs leading-5 text-[var(--kb-grey)]">
-              Mit „Angemeldet bleiben“ wird nur deine Kickbase-Session sicher im Windows Credential Manager abgelegt. Dein Passwort speichert KickTrack nicht.
+              KickTrack speichert Sitzungsdaten sicher im Windows Credential Manager. Nur beim ausdrücklich aktivierten Dauerlogin werden dort zusätzlich deine Zugangsdaten für die automatische Token-Erneuerung hinterlegt.
             </p>
           </div>
         </div>

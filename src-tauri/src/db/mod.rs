@@ -1,9 +1,13 @@
-use std::{collections::HashMap, fs, path::{Path, PathBuf}};
+use std::{
+    collections::HashMap,
+    fs,
+    path::{Path, PathBuf},
+};
 
+use crate::kickbase::{error::CommandError, league::LeagueManager};
 use base64::{engine::general_purpose::STANDARD, Engine as _};
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::Serialize;
-use crate::kickbase::{error::CommandError, league::LeagueManager};
 
 const DB_FILE_NAME: &str = "kicktrack.db";
 const APP_DIR_NAME: &str = "KickTrack";
@@ -80,12 +84,16 @@ impl KickTrackDatabase {
             CommandError::internal("Der Windows AppData-Ordner konnte nicht ermittelt werden.")
         })?;
         let app_dir = base.join(APP_DIR_NAME);
-        fs::create_dir_all(&app_dir)
-            .map_err(|_| CommandError::internal("Der KickTrack-Datenordner konnte nicht geöffnet werden."))?;
+        fs::create_dir_all(&app_dir).map_err(|_| {
+            CommandError::internal("Der KickTrack-Datenordner konnte nicht geöffnet werden.")
+        })?;
 
         let db_path = app_dir.join(DB_FILE_NAME);
-        let conn = Connection::open(&db_path)
-            .map_err(|_| CommandError::internal("Die bestehende KickTrack-Datenbank konnte nicht geöffnet werden."))?;
+        let conn = Connection::open(&db_path).map_err(|_| {
+            CommandError::internal(
+                "Die bestehende KickTrack-Datenbank konnte nicht geöffnet werden.",
+            )
+        })?;
         conn.pragma_update(None, "foreign_keys", "ON")
             .map_err(|_| CommandError::internal("SQLite konnte nicht initialisiert werden."))?;
         conn.busy_timeout(std::time::Duration::from_secs(5))
@@ -96,34 +104,46 @@ impl KickTrackDatabase {
         Ok(db)
     }
 
-
     pub fn league_managers(&self, league_id: &str) -> Result<Vec<LeagueManager>, CommandError> {
         let mut stmt = self.conn.prepare(
             "SELECT m.id, m.name, m.profile_image_remote_path, m.is_self,\n                    s.team_value, s.profit, s.points, s.average_points, s.matchday_wins, s.place\n             FROM vnext_managers m\n             LEFT JOIN vnext_manager_snapshots s\n               ON s.league_id = m.league_id AND s.manager_id = m.id\n              AND s.snapshot_date = (\n                SELECT MAX(s2.snapshot_date) FROM vnext_manager_snapshots s2\n                WHERE s2.league_id = m.league_id AND s2.manager_id = m.id\n              )\n             WHERE m.league_id = ?1\n             ORDER BY COALESCE(s.place, 999999), lower(m.name)"
         ).map_err(|_| CommandError::internal("Liga-Manager konnten nicht aus der Datenbank gelesen werden."))?;
 
-        let rows = stmt.query_map([league_id], |row| {
-            Ok(LeagueManager {
-                id: row.get(0)?,
-                name: row.get(1)?,
-                profile_image_path: row.get(2)?,
-                is_self: row.get::<_, i64>(3)? != 0,
-                team_value: row.get(4)?,
-                profit: row.get(5)?,
-                points: row.get(6)?,
-                current_matchday_points: None,
-                average_points: row.get(7)?,
-                matchday_wins: row.get(8)?,
-                place: row.get(9)?,
+        let rows = stmt
+            .query_map([league_id], |row| {
+                Ok(LeagueManager {
+                    id: row.get(0)?,
+                    name: row.get(1)?,
+                    profile_image_path: row.get(2)?,
+                    is_self: row.get::<_, i64>(3)? != 0,
+                    team_value: row.get(4)?,
+                    profit: row.get(5)?,
+                    points: row.get(6)?,
+                    current_matchday_points: None,
+                    average_points: row.get(7)?,
+                    matchday_wins: row.get(8)?,
+                    place: row.get(9)?,
+                })
             })
-        }).map_err(|_| CommandError::internal("Liga-Manager konnten nicht aus der Datenbank gelesen werden."))?;
+            .map_err(|_| {
+                CommandError::internal(
+                    "Liga-Manager konnten nicht aus der Datenbank gelesen werden.",
+                )
+            })?;
 
-        rows.collect::<Result<Vec<_>, _>>()
-            .map_err(|_| CommandError::internal("Liga-Manager konnten nicht aus der Datenbank gelesen werden."))
+        rows.collect::<Result<Vec<_>, _>>().map_err(|_| {
+            CommandError::internal("Liga-Manager konnten nicht aus der Datenbank gelesen werden.")
+        })
     }
 
-    pub fn upsert_league_managers(&mut self, league_id: &str, managers: &[LeagueManager]) -> Result<(), CommandError> {
-        let tx = self.conn.transaction()
+    pub fn upsert_league_managers(
+        &mut self,
+        league_id: &str,
+        managers: &[LeagueManager],
+    ) -> Result<(), CommandError> {
+        let tx = self
+            .conn
+            .transaction()
             .map_err(|_| CommandError::internal("Liga-Daten konnten nicht gespeichert werden."))?;
 
         for manager in managers {
@@ -138,13 +158,18 @@ impl KickTrackDatabase {
             ).map_err(|_| CommandError::internal("Liga-Snapshots konnten nicht gespeichert werden."))?;
         }
 
-        tx.commit().map_err(|_| CommandError::internal("Liga-Daten konnten nicht gespeichert werden."))?;
+        tx.commit()
+            .map_err(|_| CommandError::internal("Liga-Daten konnten nicht gespeichert werden."))?;
         Ok(())
     }
 
-        pub fn upsert_team_logos(&mut self, logos: &HashMap<String, String>) -> Result<(), CommandError> {
-        let tx = self.conn.transaction()
-            .map_err(|_| CommandError::internal("Die Teamdaten konnten nicht aktualisiert werden."))?;
+    pub fn upsert_team_logos(
+        &mut self,
+        logos: &HashMap<String, String>,
+    ) -> Result<(), CommandError> {
+        let tx = self.conn.transaction().map_err(|_| {
+            CommandError::internal("Die Teamdaten konnten nicht aktualisiert werden.")
+        })?;
 
         for (team_id, remote_path) in logos {
             tx.execute(
@@ -154,12 +179,17 @@ impl KickTrackDatabase {
             .map_err(|_| CommandError::internal("Die Teamlogos konnten nicht gespeichert werden."))?;
         }
 
-        tx.commit()
-            .map_err(|_| CommandError::internal("Die Teamlogos konnten nicht gespeichert werden."))?;
+        tx.commit().map_err(|_| {
+            CommandError::internal("Die Teamlogos konnten nicht gespeichert werden.")
+        })?;
         Ok(())
     }
 
-    pub fn set_team_logo_local_path(&self, team_id: &str, local_path: &Path) -> Result<(), CommandError> {
+    pub fn set_team_logo_local_path(
+        &self,
+        team_id: &str,
+        local_path: &Path,
+    ) -> Result<(), CommandError> {
         self.conn.execute(
             "UPDATE vnext_teams SET logo_local_path = ?2, updated_at = datetime('now') WHERE id = ?1",
             params![team_id, local_path.to_string_lossy().to_string()],
@@ -168,7 +198,11 @@ impl KickTrackDatabase {
         Ok(())
     }
 
-    pub fn player_enrichment(&self, player_id: &str, live_team_id: Option<&str>) -> Result<PlayerEnrichment, CommandError> {
+    pub fn player_enrichment(
+        &self,
+        player_id: &str,
+        live_team_id: Option<&str>,
+    ) -> Result<PlayerEnrichment, CommandError> {
         let player = self.conn
             .query_row(
                 "SELECT p.display_name, p.full_name, p.team_id, COALESCE(pm.portrait_path, p.portrait_path)
@@ -181,7 +215,8 @@ impl KickTrackDatabase {
             .optional()
             .map_err(|_| CommandError::internal("Spieler-Stammdaten konnten nicht gelesen werden."))?;
 
-        let (display_name, full_name, stored_team_id, portrait_path) = player.unwrap_or_else(|| (String::new(), None, None, None));
+        let (display_name, full_name, stored_team_id, portrait_path) =
+            player.unwrap_or_else(|| (String::new(), None, None, None));
         let first_name = infer_first_name(full_name.as_deref(), &display_name);
         let team_id = live_team_id.map(str::to_owned).or(stored_team_id);
 
@@ -190,15 +225,24 @@ impl KickTrackDatabase {
                 .query_row(
                     "SELECT name, logo_remote_path, logo_local_path FROM vnext_teams WHERE id = ?1",
                     [team_id],
-                    |row| Ok((row.get::<_, Option<String>>(0)?, row.get::<_, Option<String>>(1)?, row.get::<_, Option<String>>(2)?)),
+                    |row| {
+                        Ok((
+                            row.get::<_, Option<String>>(0)?,
+                            row.get::<_, Option<String>>(1)?,
+                            row.get::<_, Option<String>>(2)?,
+                        ))
+                    },
                 )
                 .optional()
-                .map_err(|_| CommandError::internal("Team-Stammdaten konnten nicht gelesen werden."))?
+                .map_err(|_| {
+                    CommandError::internal("Team-Stammdaten konnten nicht gelesen werden.")
+                })?
         } else {
             None
         };
 
-        let (club_name, team_logo_remote_path, team_logo_local_path) = team.unwrap_or((None, None, None));
+        let (club_name, team_logo_remote_path, team_logo_local_path) =
+            team.unwrap_or((None, None, None));
 
         Ok(PlayerEnrichment {
             first_name,
@@ -210,29 +254,121 @@ impl KickTrackDatabase {
         })
     }
 
-    pub fn market_value_history(&self, player_id: &str) -> Result<Vec<(String, i64)>, CommandError> {
-        if !self.table_exists("market_values")? { return Ok(Vec::new()); }
+    pub fn market_value_history(
+        &self,
+        player_id: &str,
+    ) -> Result<Vec<(String, i64)>, CommandError> {
+        if !self.table_exists("market_values")? {
+            return Ok(Vec::new());
+        }
         let mut stmt = self.conn.prepare(
-            "SELECT mv.snapshot_date, mv.value
-             FROM market_values mv
-             INNER JOIN (
-               SELECT snapshot_date, MAX(id) AS latest_id
+            "SELECT snapshot_date, value
+             FROM (
+               SELECT snapshot_date, value,
+                      ROW_NUMBER() OVER (
+                        PARTITION BY snapshot_date
+                        ORDER BY CASE WHEN source = 'kickbase_history' THEN 1 ELSE 0 END DESC,
+                                 CASE WHEN length(recorded_at) >= 19 THEN recorded_at ELSE '' END DESC,
+                                 id DESC
+                      ) AS row_number
                FROM market_values
-               WHERE player_id = ?1 AND snapshot_date IS NOT NULL
-               GROUP BY snapshot_date
-             ) daily ON daily.latest_id = mv.id
-             ORDER BY mv.snapshot_date ASC"
+               WHERE player_id = ?1 AND snapshot_date IS NOT NULL AND value > 0
+             ) WHERE row_number = 1
+             ORDER BY snapshot_date ASC"
         ).map_err(|_| CommandError::internal("Marktwert-Historie konnte nicht gelesen werden."))?;
-        let rows = stmt.query_map([player_id], |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)))
-            .map_err(|_| CommandError::internal("Marktwert-Historie konnte nicht gelesen werden."))?;
+        let rows = stmt
+            .query_map([player_id], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+            })
+            .map_err(|_| {
+                CommandError::internal("Marktwert-Historie konnte nicht gelesen werden.")
+            })?;
         rows.collect::<Result<Vec<_>, _>>()
             .map_err(|_| CommandError::internal("Marktwert-Historie konnte nicht gelesen werden."))
     }
 
-    pub fn team_logo_cache_path(&self, team_id: &str, remote_path: &str) -> Result<PathBuf, CommandError> {
+    pub fn market_value_history_needs_refresh(
+        &self,
+        player_id: &str,
+    ) -> Result<bool, CommandError> {
+        if !self.table_exists("market_values")? {
+            return Ok(true);
+        }
+        self.conn
+            .query_row(
+                "SELECT CASE
+                   WHEN COUNT(DISTINCT CASE
+                          WHEN source = 'kickbase_history' THEN snapshot_date
+                        END) = 0 THEN 1
+                   WHEN MAX(CASE
+                          WHEN source = 'kickbase_history' THEN snapshot_date
+                        END) < date('now','localtime','-2 days') THEN 1
+                   ELSE 0
+                 END
+                 FROM market_values
+                 WHERE player_id = ?1 AND snapshot_date IS NOT NULL AND value > 0",
+                [player_id],
+                |row| row.get::<_, i64>(0),
+            )
+            .map(|value| value != 0)
+            .map_err(|_| {
+                CommandError::internal("Die Aktualität der Marktwert-Historie konnte nicht geprüft werden.")
+            })
+    }
+
+    pub fn save_remote_market_value_history(
+        &mut self,
+        player_id: &str,
+        points: &[(String, i64)],
+    ) -> Result<(), CommandError> {
+        if points.is_empty() || !self.table_exists("market_values")? {
+            return Ok(());
+        }
+        let tx = self
+            .conn
+            .transaction()
+            .map_err(|_| CommandError::internal("MW-Historie konnte nicht gespeichert werden."))?;
+        for (date, value) in points {
+            if *value <= 0 {
+                continue;
+            }
+            let normalized: Option<String> = tx
+                .query_row("SELECT date(?1)", [date], |row| row.get(0))
+                .map_err(|_| CommandError::internal("Ein Marktwert-Datum war ungültig."))?;
+            if normalized.as_deref() != Some(date.as_str()) {
+                continue;
+            }
+            let updated = tx
+                .execute(
+                    "UPDATE market_values
+                 SET value = ?2, recorded_at = ?3 || ' 22:00:00', source = 'kickbase_history'
+                 WHERE player_id = ?1 AND snapshot_date = ?3",
+                    params![player_id, value, date],
+                )
+                .map_err(|_| {
+                    CommandError::internal("MW-Historie konnte nicht aktualisiert werden.")
+                })?;
+            if updated == 0 {
+                tx.execute(
+                    "INSERT INTO market_values (player_id, value, recorded_at, snapshot_date, source)
+                     VALUES (?1, ?2, ?3 || ' 22:00:00', ?3, 'kickbase_history')",
+                    params![player_id, value, date],
+                ).map_err(|_| CommandError::internal("MW-Historie konnte nicht gespeichert werden."))?;
+            }
+        }
+        tx.commit()
+            .map_err(|_| CommandError::internal("MW-Historie konnte nicht gespeichert werden."))
+    }
+
+    pub fn team_logo_cache_path(
+        &self,
+        team_id: &str,
+        remote_path: &str,
+    ) -> Result<PathBuf, CommandError> {
         let logos_dir = self.app_dir.join("team_logos");
-        fs::create_dir_all(&logos_dir)
-            .map_err(|_| CommandError::internal("Der Teamlogo-Cache konnte nicht erstellt werden."))?;
+        fs::create_dir_all(&logos_dir).map_err(|_| {
+            CommandError::internal("Der Teamlogo-Cache konnte nicht erstellt werden.")
+        })?;
 
         let ext = Path::new(remote_path)
             .extension()
@@ -250,25 +386,34 @@ impl KickTrackDatabase {
             return Ok(0);
         }
 
-        let local_hour: i64 = self.conn.query_row(
-            "SELECT CAST(strftime('%H','now','localtime') AS INTEGER)",
-            [],
-            |row| row.get(0),
-        )
-        .map_err(|_| CommandError::internal("Die lokale Refresh-Zeit konnte nicht bestimmt werden."))?;
+        let local_hour: i64 = self
+            .conn
+            .query_row(
+                "SELECT CAST(strftime('%H','now','localtime') AS INTEGER)",
+                [],
+                |row| row.get(0),
+            )
+            .map_err(|_| {
+                CommandError::internal("Die lokale Refresh-Zeit konnte nicht bestimmt werden.")
+            })?;
 
         // A manual refresh during the day is live state, not a completed
         // Kickbase 22:00 market-value refresh. Do not let it overwrite the
         // canonical daily history used by 24H dynamics and the prediction
         // model. Also repair rows written by the older force-refresh code.
         if local_hour < 22 {
-            self.conn.execute(
-                "DELETE FROM market_values
+            self.conn
+                .execute(
+                    "DELETE FROM market_values
                  WHERE snapshot_date = date('now','localtime')
                    AND source = 'force_refresh'",
-                [],
-            )
-            .map_err(|_| CommandError::internal("Alte Force-Refresh-MW-Werte konnten nicht bereinigt werden."))?;
+                    [],
+                )
+                .map_err(|_| {
+                    CommandError::internal(
+                        "Alte Force-Refresh-MW-Werte konnten nicht bereinigt werden.",
+                    )
+                })?;
 
             #[cfg(debug_assertions)]
             crate::kt_debug!(
@@ -278,8 +423,9 @@ impl KickTrackDatabase {
             return Ok(0);
         }
 
-        let tx = self.conn.transaction()
-            .map_err(|_| CommandError::internal("MW-Snapshots konnten nicht vorbereitet werden."))?;
+        let tx = self.conn.transaction().map_err(|_| {
+            CommandError::internal("MW-Snapshots konnten nicht vorbereitet werden.")
+        })?;
 
         let mut written = 0usize;
         for (player_id, value) in snapshots {
@@ -308,8 +454,9 @@ impl KickTrackDatabase {
             written += 1;
         }
 
-        tx.commit()
-            .map_err(|_| CommandError::internal("MW-Snapshots konnten nicht gespeichert werden."))?;
+        tx.commit().map_err(|_| {
+            CommandError::internal("MW-Snapshots konnten nicht gespeichert werden.")
+        })?;
 
         Ok(written)
     }
@@ -325,35 +472,45 @@ impl KickTrackDatabase {
         }
 
         let total_assets = budget.map(|value| value.saturating_add(team_value));
-        self.conn.execute(
-            "INSERT INTO dashboard_snapshots
+        self.conn
+            .execute(
+                "INSERT INTO dashboard_snapshots
                (league_id, snapshot_date, team_value, budget, total_assets, recorded_at)
-             VALUES (?1, date('now'), ?2, ?3, ?4, datetime('now'))
+             VALUES (?1, date('now','localtime'), ?2, ?3, ?4, datetime('now','localtime'))
              ON CONFLICT(league_id, snapshot_date) DO UPDATE SET
                team_value = excluded.team_value,
                budget = excluded.budget,
                total_assets = excluded.total_assets,
                recorded_at = excluded.recorded_at",
-            params![league_id, team_value, budget, total_assets],
-        )
-        .map_err(|_| CommandError::internal("Dashboard-Snapshot konnte nicht gespeichert werden."))?;
+                params![league_id, team_value, budget, total_assets],
+            )
+            .map_err(|_| {
+                CommandError::internal("Dashboard-Snapshot konnte nicht gespeichert werden.")
+            })?;
         Ok(())
     }
-
 }
 
 fn infer_first_name(full_name: Option<&str>, display_name: &str) -> Option<String> {
     let full = full_name?.trim();
-    if full.is_empty() { return None; }
+    if full.is_empty() {
+        return None;
+    }
     let display = display_name.trim();
     if !display.is_empty() {
         if let Some(prefix) = full.strip_suffix(display) {
             let prefix = prefix.trim_matches(|c: char| c.is_whitespace() || c == ',' || c == '-');
-            if !prefix.is_empty() { return Some(prefix.to_string()); }
+            if !prefix.is_empty() {
+                return Some(prefix.to_string());
+            }
         }
     }
     let first = full.split_whitespace().next()?;
-    if first.eq_ignore_ascii_case(display) { None } else { Some(first.to_string()) }
+    if first.eq_ignore_ascii_case(display) {
+        None
+    } else {
+        Some(first.to_string())
+    }
 }
 
 pub fn file_data_url(path: &str) -> Option<String> {
@@ -369,10 +526,118 @@ pub fn bytes_data_url(bytes: &[u8], source_path: &str) -> String {
 }
 
 fn mime_for_path(path: &Path) -> &'static str {
-    match path.extension().and_then(|value| value.to_str()).map(|value| value.to_ascii_lowercase()) {
+    match path
+        .extension()
+        .and_then(|value| value.to_str())
+        .map(|value| value.to_ascii_lowercase())
+    {
         Some(ext) if ext == "svg" => "image/svg+xml",
         Some(ext) if ext == "jpg" || ext == "jpeg" || ext == "jpe" => "image/jpeg",
         Some(ext) if ext == "webp" => "image/webp",
         _ => "image/png",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn memory_database() -> KickTrackDatabase {
+        KickTrackDatabase {
+            conn: Connection::open_in_memory().expect("in-memory database"),
+            app_dir: PathBuf::new(),
+        }
+    }
+
+    #[test]
+    fn migrations_create_history_tables_on_a_fresh_database() {
+        let mut db = memory_database();
+        db.run_migrations().expect("first migration run");
+        db.run_migrations().expect("idempotent migration run");
+
+        assert!(db
+            .table_exists("market_values")
+            .expect("market_values lookup"));
+        assert!(db
+            .table_exists("dashboard_snapshots")
+            .expect("dashboard lookup"));
+        let version: i64 = db
+            .conn
+            .query_row(
+                "SELECT MAX(version) FROM vnext_schema_migrations",
+                [],
+                |row| row.get(0),
+            )
+            .expect("migration version");
+        assert_eq!(version, 6);
+    }
+
+    #[test]
+    fn remote_history_updates_without_deleting_the_daily_row() {
+        let mut db = memory_database();
+        db.run_migrations().expect("migrations");
+        db.conn
+            .execute(
+                "INSERT INTO market_values(player_id,value,recorded_at,snapshot_date,source)
+             VALUES('p1',100,'2026-10-20 21:00:00','2026-10-20','force_refresh')",
+                [],
+            )
+            .expect("seed history");
+
+        db.save_remote_market_value_history("p1", &[("2026-10-20".into(), 125)])
+            .expect("remote history");
+
+        let (count, value, source): (i64, i64, String) = db
+            .conn
+            .query_row(
+                "SELECT COUNT(*), MAX(value), MAX(source) FROM market_values
+             WHERE player_id='p1' AND snapshot_date='2026-10-20'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .expect("stored history");
+        assert_eq!(
+            (count, value, source.as_str()),
+            (1, 125, "kickbase_history")
+        );
+    }
+
+    #[test]
+    fn history_refresh_requires_an_authoritative_api_backfill() {
+        let mut db = memory_database();
+        db.run_migrations().expect("migrations");
+        assert!(db
+            .market_value_history_needs_refresh("p1")
+            .expect("empty history"));
+
+        db.conn
+            .execute_batch(
+                "INSERT INTO market_values(player_id,value,recorded_at,snapshot_date,source)
+                 VALUES('p1',100,datetime('now','localtime'),date('now','localtime'),'test');",
+            )
+            .expect("first day");
+        assert!(db
+            .market_value_history_needs_refresh("p1")
+            .expect("single local day"));
+
+        db.conn
+            .execute_batch(
+                "INSERT INTO market_values(player_id,value,recorded_at,snapshot_date,source)
+                 VALUES('p1',90,datetime('now','localtime','-1 day'),date('now','localtime','-1 day'),'test');",
+            )
+            .expect("second day");
+        assert!(db
+            .market_value_history_needs_refresh("p1")
+            .expect("two local days are not a historical backfill"));
+
+        let today: String = db
+            .conn
+            .query_row("SELECT date('now','localtime')", [], |row| row.get(0))
+            .expect("today");
+        db.save_remote_market_value_history("p1", &[(today, 125)])
+            .expect("api backfill");
+        assert!(!db
+            .market_value_history_needs_refresh("p1")
+            .expect("fresh api history"));
     }
 }

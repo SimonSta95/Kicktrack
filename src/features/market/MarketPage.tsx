@@ -13,17 +13,16 @@ import { getBundledTeamLogo } from "@/lib/team-assets";
 import { usePlayerDetail } from "@/features/player-detail/PlayerDetailProvider";
 import { PlayerStatus } from "@/components/player-status/PlayerStatus";
 import { PositionBadge } from "@/components/position-badge/PositionBadge";
-import { MarketDynamicsIndicator } from "@/components/market-dynamics/MarketDynamicsIndicator";
 import { useMarketDynamics } from "@/features/analytics/use-market-dynamics";
-import { getMarketValueHistories } from "@/features/analytics/api";
+import { getMarketValueHistories, getPlayerRecentForms } from "@/features/analytics/api";
 import type { MarketValuePoint } from "@/features/player-detail/types";
 import { useMvPredictions } from "@/features/analytics/use-mv-predictions";
 import { estimateFairValue } from "@/features/analytics/decision-intelligence";
 import { useFairValueReference } from "@/features/analytics/use-decision-intelligence";
-import { MvPredictionIndicator } from "@/components/mv-prediction/MvPredictionIndicator";
+import { MarketSparkline, RecentFormBars } from "./MarketMiniCharts";
 import { getLeagueAccountContext } from "@/features/account/api";
-import { getLeagueNextMatchday, getLeagueSquad } from "@/features/squad/api";
-import type { NextFixture, PlayerPosition } from "@/features/squad/types";
+import { getLeagueSquad } from "@/features/squad/api";
+import type { PlayerPosition } from "@/features/squad/types";
 import { placeMarketOffer, withdrawMarketOffer } from "./api";
 import type { MarketEntry } from "./types";
 import { MarketSalesDrawer } from "./MarketSalesDrawer";
@@ -33,6 +32,7 @@ import { LeaguePriceIndicator } from "./LeaguePriceIndicator";
 import { getLeaguePurchasePriceStats } from "./league-price-api";
 import { bidReasonLabel, evaluateBidEligibility, resolveBalanceAfterActiveBids } from "./bid-eligibility";
 import { DEFAULT_SQUAD_LIMIT, formatCreditLimitLabel } from "@/lib/kickbase-rules";
+import { isDateOlderThan } from "@/lib/date-only";
 import "./market.css";
 
 const POSITION_ORDER: Record<PlayerPosition, number> = { GOALKEEPER: 1, DEFENDER: 2, MIDFIELDER: 3, FORWARD: 4, UNKNOWN: 5 };
@@ -65,7 +65,6 @@ export function MarketPage({ entries, leagueId }: { entries: MarketEntry[]; leag
   const squadQuery = useQuery({ queryKey: ["squad", leagueId], queryFn: () => getLeagueSquad(leagueId) });
   const accountQuery = useQuery({ queryKey: ["account", "league", leagueId], queryFn: () => getLeagueAccountContext(leagueId) });
   const ownPlayerIds = useMemo(() => new Set((squadQuery.data?.players ?? []).map((player) => player.id)), [squadQuery.data]);
-  const fixturesQuery = useQuery({ queryKey: ["fixtures", "next", leagueId], queryFn: () => getLeagueNextMatchday(leagueId), staleTime: 10 * 60 * 1000 });
   const fairReferenceQuery = useFairValueReference();
 
   // /market does not reliably contain tfhmvt for every listing. We already keep one
@@ -73,10 +72,17 @@ export function MarketPage({ entries, leagueId }: { entries: MarketEntry[]; leag
   // as a transparent fallback for the 24H column and all analyses that depend on it.
   const historyPlayerIds = useMemo(() => [...new Set(entries.map((entry) => entry.playerId))].sort(), [entries]);
   const historiesQuery = useQuery({
-    queryKey: ["analytics", "market-value-histories", historyPlayerIds],
-    queryFn: () => getMarketValueHistories(historyPlayerIds),
+    queryKey: ["analytics", "market-value-histories", leagueId, historyPlayerIds],
+    queryFn: () => getMarketValueHistories(leagueId, historyPlayerIds),
     enabled: historyPlayerIds.length > 0,
-    staleTime: 5 * 60 * 1000,
+    staleTime: 30 * 60 * 1000,
+  });
+  const recentFormsQuery = useQuery({
+    queryKey: ["analytics", "player-recent-forms", leagueId, historyPlayerIds],
+    queryFn: () => getPlayerRecentForms(leagueId, historyPlayerIds),
+    enabled: Boolean(leagueId && historyPlayerIds.length),
+    staleTime: 30 * 60 * 1000,
+    retry: false,
   });
   const effectiveEntries = useMemo(() => entries.map((entry) => {
     const fallback = latestDailyMarketValueDelta(historiesQuery.data?.[entry.playerId] ?? []);
@@ -102,7 +108,7 @@ export function MarketPage({ entries, leagueId }: { entries: MarketEntry[]; leag
   }, [effectiveEntries, fairReferenceQuery.data?.players]);
 
   const dynamicsInputs = useMemo(() => effectiveEntries.map((entry) => ({ id: entry.playerId, marketValue: entry.marketValue, marketValueChange24h: entry.marketValueChange24h })), [effectiveEntries]);
-  const dynamicsByPlayer = useMarketDynamics(dynamicsInputs);
+  const dynamicsByPlayer = useMarketDynamics(leagueId, dynamicsInputs);
   const predictionInputs = useMemo(() => effectiveEntries.map((entry) => ({ playerId: entry.playerId, marketValue: entry.marketValue, marketValueChange24h: entry.marketValueChange24h })), [effectiveEntries]);
   const predictionQuery = useMvPredictions(leagueId, predictionInputs);
   const leaguePriceInputs = useMemo(() => effectiveEntries.map((entry) => ({
@@ -147,7 +153,7 @@ export function MarketPage({ entries, leagueId }: { entries: MarketEntry[]; leag
     },
     { accessorKey: "marketValue", header: "Marktwert", sortingFn: (a,b)=>compareNullableNumbers(a.original.marketValue,b.original.marketValue), cell: ({row}) => <MarketValueCell value={row.original.marketValue} fair={fairValueByPlayer.get(row.original.playerId)} loading={fairReferenceQuery.isLoading}/> },
     { accessorKey: "marketValueChange24h", header: "24H", sortingFn: (a,b)=>compareNullableNumbers(a.original.marketValueChange24h,b.original.marketValueChange24h), cell: ({row}) => <SignedMoney value={row.original.marketValueChange24h}/> },
-    { id: "trend", header: "Trend", enableSorting: false, cell: ({row}) => <div className="market-trend-cell"><MvPredictionIndicator prediction={predictionQuery.byPlayer.get(row.original.playerId)} quality={predictionQuery.data?.quality} /><MarketDynamicsIndicator dynamics={dynamicsByPlayer.get(row.original.playerId)} /></div> },
+    { id: "mvHistory", header: "MW-Verlauf", enableSorting: false, cell: ({row}) => <MarketSparkline points={historiesQuery.data?.[row.original.playerId] ?? []} prediction={predictionQuery.byPlayer.get(row.original.playerId)} currentValue={row.original.marketValue} /> },
     { accessorKey: "price", header: "Preis", sortingFn: (a,b)=>compareNullableNumbers(a.original.price,b.original.price), cell: ({row}) => <Money value={row.original.price} strong/> },
     {
       id: "leaguePrice",
@@ -157,9 +163,9 @@ export function MarketPage({ entries, leagueId }: { entries: MarketEntry[]; leag
       sortUndefined: "last",
       cell: ({row}) => <LeaguePriceIndicator stat={leaguePriceByPlayer.get(row.original.playerId)} loading={leaguePriceQuery.isLoading} />,
     },
-    { id: "opponent", accessorFn: (entry) => opponentLabel(entry.teamId, fixturesQuery.data?.fixtures ?? []), header: fixturesQuery.data?.dayNumber ? `Gegner ST${fixturesQuery.data.dayNumber}` : "Gegner", cell: ({row}) => <span className="market-empty">{opponentLabel(row.original.teamId, fixturesQuery.data?.fixtures ?? [])}</span> },
     { id: "points", accessorFn: (entry) => entry.pointsTotal ?? undefined, header: "Punkte", sortingFn: "basic", sortUndefined: "last", cell: ({row}) => <MarketPointsCell total={row.original.pointsTotal} average={row.original.averagePoints} /> },
     { id: "pointsPerMillion", accessorFn: (entry) => pointsPerMillion(entry.averagePoints, entry.marketValue) ?? undefined, header: "Pkt/Mio", sortingFn: "basic", sortUndefined: "last", cell: ({row}) => <NumberValue value={pointsPerMillion(row.original.averagePoints, row.original.marketValue)} decimals={1}/> },
+    { id: "recentForm", header: "Form", enableSorting: false, cell: ({row}) => <RecentFormBars entries={recentFormsQuery.data?.forms[row.original.playerId]} loading={recentFormsQuery.isLoading} unavailable={recentFormsQuery.data?.unavailablePlayerIds.includes(row.original.playerId)} /> },
     { accessorKey: "ownOffer", header: "Mein Gebot", sortingFn: (a,b)=>compareNullableNumbers(a.original.ownOffer,b.original.ownOffer), cell: ({row}) => row.original.ownOffer == null ? <span className="market-empty">—</span> : <span className="market-own-offer">{formatCurrency(row.original.ownOffer)}</span> },
     { id: "expiresInSeconds", accessorFn: (entry) => entry.expiresInSeconds ?? undefined, header: "Restzeit", sortingFn: "basic", sortUndefined: "last", cell: ({row}) => <Expiry seconds={row.original.expiresInSeconds} elapsedSeconds={Math.floor((now - fetchedAt) / 1000)}/> },
     {
@@ -176,7 +182,7 @@ export function MarketPage({ entries, leagueId }: { entries: MarketEntry[]; leag
         </button>;
       },
     },
-  ], [dynamicsByPlayer, fairReferenceQuery.isLoading, fairValueByPlayer, fetchedAt, fixturesQuery.data?.dayNumber, fixturesQuery.data?.fixtures, leagueId, leaguePriceByPlayer, leaguePriceQuery.isLoading, now, ownPlayerIds, predictionQuery.byPlayer, predictionQuery.data?.quality]);
+  ], [fairReferenceQuery.isLoading, fairValueByPlayer, fetchedAt, leagueId, leaguePriceByPlayer, leaguePriceQuery.isLoading, now, ownPlayerIds, predictionQuery.byPlayer, historiesQuery.data, recentFormsQuery.data, recentFormsQuery.isLoading]);
 
   useEffect(() => {
     const timer = window.setInterval(() => setNow(Date.now()), 30_000);
@@ -204,7 +210,7 @@ export function MarketPage({ entries, leagueId }: { entries: MarketEntry[]; leag
       if (signalFilter === "VALUE") return efficientPlayerIds.has(entry.playerId);
       return true;
     });
-  }, [dynamicsByPlayer, effectiveEntries, efficientPlayerIds, position, query, signalFilter]);
+  }, [effectiveEntries, efficientPlayerIds, position, query, signalFilter]);
 
   const table = useReactTable({ data: filtered, columns, state: { sorting }, onSortingChange: setSorting, getCoreRowModel: getCoreRowModel(), getSortedRowModel: getSortedRowModel() });
 
@@ -217,7 +223,7 @@ export function MarketPage({ entries, leagueId }: { entries: MarketEntry[]; leag
     }).length;
     const value = efficientPlayerIds.size;
     return { ownOffers, endingSoon, hot, value };
-  }, [dynamicsByPlayer, efficientPlayerIds, effectiveEntries, entries]);
+  }, [efficientPlayerIds, effectiveEntries, entries]);
 
   const displayedBalanceAfterBids = resolveBalanceAfterActiveBids(
     accountQuery.data?.budget ?? null,
@@ -392,6 +398,8 @@ function latestDailyMarketValueDelta(history: MarketValuePoint[]) {
 
   if (points.length < 2) return null;
   const latest = points[points.length - 1];
+  // Never turn weeks-old local history into a misleading "24H" change.
+  if (isDateOlderThan(latest.date, 2)) return null;
   let previousIndex = points.length - 2;
   while (previousIndex >= 0 && points[previousIndex].date === latest.date) previousIndex -= 1;
   if (previousIndex < 0) return null;
@@ -445,12 +453,4 @@ function isEfficientMarketEntry(entry: MarketEntry) {
   const average = finiteNumber(entry.averagePoints);
   const ppm = pointsPerMillion(entry.averagePoints, entry.marketValue);
   return average != null && average >= 70 && ppm != null && ppm >= 8;
-}
-
-function opponentLabel(teamId: string | null, fixtures: NextFixture[]) {
-  if (!teamId) return "—";
-  const fixture = fixtures.find((item) => item.homeTeamId === teamId || item.awayTeamId === teamId);
-  if (!fixture) return "—";
-  const home = fixture.homeTeamId === teamId;
-  return `${home ? "vs." : "@"} ${home ? fixture.awayTeamName : fixture.homeTeamName}`;
 }

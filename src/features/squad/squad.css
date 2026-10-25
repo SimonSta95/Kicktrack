@@ -203,6 +203,7 @@
 
 .squad-table {
   width: 100%;
+  min-width: 1560px;
   border-collapse: collapse;
   table-layout: fixed;
 }
@@ -224,8 +225,13 @@
   box-shadow: 0 1px 0 rgba(0, 0, 0, .28);
 }
 
-.squad-table th:first-child { width: 31%; }
-.squad-table th:nth-child(2) { width: 8%; }
+.squad-table th:first-child { width: 260px; }
+.squad-table th:nth-child(2) { width: 70px; }
+.squad-table th:nth-child(3) { width: 130px; }
+.squad-table th:nth-child(4) { width: 110px; }
+.squad-table th:nth-child(5) { width: 135px; }
+.squad-table th:nth-child(11) { width: 95px; }
+.squad-table th:nth-child(12) { width: 100px; }
 
 .squad-table td {
   height: var(--squad-row-height);
@@ -342,7 +348,7 @@
 
 /* Width responsiveness: drop lower-value columns before shrinking content. */
 @media (max-width: 1280px) {
-  .squad-table th:nth-child(5), .squad-table td:nth-child(5) { display:none; }
+  .squad-table th:nth-child(6), .squad-table td:nth-child(6) { display:none; }
   .squad-table th:first-child { width:36%; }
 }
 
@@ -351,7 +357,7 @@
   .squad-summary { grid-template-columns:1fr 1fr; }
   .squad-summary__item:last-child { display:none; }
   .squad-search { width:min(260px,36vw); }
-  .squad-table th:nth-child(7), .squad-table td:nth-child(7) { display:none; }
+  .squad-table th:nth-child(8), .squad-table td:nth-child(8) { display:none; }
   .squad-table th:first-child { width:42%; }
 }
 
@@ -361,7 +367,7 @@
   .squad-page__count { padding:6px 8px; font-size:12px; }
   .squad-toolbar { flex-direction:column; align-items:stretch; }
   .squad-search { width:100%; }
-  .squad-table { min-width:720px; }
+  .squad-table { min-width:1380px; }
 }
 .squad-player-row{cursor:pointer}.squad-player-row:focus-visible{outline:1px solid rgba(255,70,0,.65);outline-offset:-1px}.squad-player-row:hover td{background:rgba(255,255,255,.025)}
 
@@ -375,3 +381,24 @@
 
 .squad-page__header-actions{display:flex;align-items:center;gap:8px}.squad-assets-trigger{height:32px;display:inline-flex;align-items:center;gap:7px;padding:0 10px;border:1px solid var(--border);border-radius:6px;background:rgba(255,255,255,.02);color:var(--kb-light-grey);font-size:10px;font-weight:750}.squad-assets-trigger:hover{background:rgba(255,255,255,.05);color:var(--kb-white)}
 @media(max-width:980px){.squad-assets-trigger span{display:none}.squad-assets-trigger{width:32px;padding:0;justify-content:center}}
+
+/* The roster stays viewport-bound; the opponent column was removed in favour
+   of the two player signals, so horizontal scrolling is unnecessary. */
+.squad-table-frame { overflow-x: hidden; overflow-y: auto; }
+.squad-table { width: 100%; min-width: 0; table-layout: fixed; }
+.squad-table th:nth-child(1) { width: 21%; }
+.squad-table th:nth-child(2) { width: 5%; }
+.squad-table th:nth-child(3) { width: 9%; }
+.squad-table th:nth-child(4) { width: 8%; }
+.squad-table th:nth-child(5) { width: 10%; }
+.squad-table th:nth-child(6) { width: 7%; }
+.squad-table th:nth-child(7) { width: 7%; }
+.squad-table th:nth-child(8) { width: 9%; }
+.squad-table th:nth-child(9) { width: 6%; }
+.squad-table th:nth-child(10) { width: 6%; }
+.squad-table th:nth-child(11) { width: 7%; }
+.squad-table th:nth-child(12) { width: 5%; }
+
+@media (max-width: 1280px) {
+  .squad-table th:nth-child(1) { width: 24%; }
+}

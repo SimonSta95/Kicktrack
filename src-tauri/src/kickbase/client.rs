@@ -10,6 +10,7 @@ use super::{
 
 const KICKBASE_BASE_URL: &str = "https://api.kickbase.com";
 
+#[derive(Clone)]
 pub struct KickbaseClient {
     http: reqwest::Client,
 }
@@ -25,7 +26,7 @@ impl KickbaseClient {
         let http = reqwest::Client::builder()
             .connect_timeout(Duration::from_secs(10))
             .timeout(Duration::from_secs(20))
-            .user_agent("KickTrack/0.2")
+            .user_agent(concat!("KickTrack/", env!("CARGO_PKG_VERSION")))
             .default_headers(default_headers)
             .build()?;
 
@@ -54,13 +55,15 @@ impl KickbaseClient {
             .map_err(|error| CommandError::network(readable_network_error(&error)))?;
 
         let status = response.status();
-        let body = response
-            .text()
-            .await
-            .map_err(|_| CommandError::invalid_response("Kickbase hat eine unlesbare Antwort geliefert."))?;
+        let body = response.text().await.map_err(|_| {
+            CommandError::invalid_response("Kickbase hat eine unlesbare Antwort geliefert.")
+        })?;
 
         if !status.is_success() {
-            return Err(CommandError::http(status.as_u16(), http_error_message(status, &body)));
+            return Err(CommandError::http(
+                status.as_u16(),
+                http_error_message(status, &body),
+            ));
         }
 
         serde_json::from_str::<KickbaseLoginResponse>(&body).map_err(|_| {
@@ -82,21 +85,25 @@ impl KickbaseClient {
             .map_err(|error| CommandError::network(readable_network_error(&error)))?;
 
         let status = response.status();
-        let body = response
-            .text()
-            .await
-            .map_err(|_| CommandError::invalid_response("Kickbase hat eine unlesbare Antwort geliefert."))?;
+        let body = response.text().await.map_err(|_| {
+            CommandError::invalid_response("Kickbase hat eine unlesbare Antwort geliefert.")
+        })?;
 
         if !status.is_success() {
             if matches!(status, StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN) {
                 return Err(CommandError::session_expired());
             }
 
-            return Err(CommandError::http(status.as_u16(), http_error_message(status, &body)));
+            return Err(CommandError::http(
+                status.as_u16(),
+                http_error_message(status, &body),
+            ));
         }
 
         serde_json::from_str::<Value>(&body).map_err(|_| {
-            CommandError::invalid_response("Kickbase hat JSON in einem unbekannten Format geliefert.")
+            CommandError::invalid_response(
+                "Kickbase hat JSON in einem unbekannten Format geliefert.",
+            )
         })
     }
     pub async fn get_bytes(&self, token: &str, path: &str) -> Result<Vec<u8>, CommandError> {
@@ -131,38 +138,67 @@ impl KickbaseClient {
             .bytes()
             .await
             .map(|bytes| bytes.to_vec())
-            .map_err(|_| CommandError::invalid_response("Ein Kickbase-Asset konnte nicht gelesen werden."))
+            .map_err(|_| {
+                CommandError::invalid_response("Ein Kickbase-Asset konnte nicht gelesen werden.")
+            })
     }
 
-    pub async fn post_json(&self, token: &str, path: &str, payload: Option<Value>) -> Result<Value, CommandError> {
-        let mut request = self.http.post(format!("{KICKBASE_BASE_URL}{path}"))
+    pub async fn post_json(
+        &self,
+        token: &str,
+        path: &str,
+        payload: Option<Value>,
+    ) -> Result<Value, CommandError> {
+        let mut request = self
+            .http
+            .post(format!("{KICKBASE_BASE_URL}{path}"))
             .header(header::ACCEPT, "application/json")
             .bearer_auth(token)
             .header(header::COOKIE, format!("kkstrauth={token}"));
-        if let Some(payload) = payload { request = request.json(&payload); }
-        self.read_json_response(request.send().await.map_err(|error| CommandError::network(readable_network_error(&error)))?).await
+        if let Some(payload) = payload {
+            request = request.json(&payload);
+        }
+        self.read_json_response(
+            request
+                .send()
+                .await
+                .map_err(|error| CommandError::network(readable_network_error(&error)))?,
+        )
+        .await
     }
 
     pub async fn delete_json(&self, token: &str, path: &str) -> Result<Value, CommandError> {
-        let response = self.http.delete(format!("{KICKBASE_BASE_URL}{path}"))
+        let response = self
+            .http
+            .delete(format!("{KICKBASE_BASE_URL}{path}"))
             .header(header::ACCEPT, "application/json")
             .bearer_auth(token)
             .header(header::COOKIE, format!("kkstrauth={token}"))
-            .send().await.map_err(|error| CommandError::network(readable_network_error(&error)))?;
+            .send()
+            .await
+            .map_err(|error| CommandError::network(readable_network_error(&error)))?;
         self.read_json_response(response).await
     }
 
     async fn read_json_response(&self, response: reqwest::Response) -> Result<Value, CommandError> {
         let status = response.status();
-        let body = response.text().await.map_err(|_| CommandError::invalid_response("Kickbase hat eine unlesbare Antwort geliefert."))?;
+        let body = response.text().await.map_err(|_| {
+            CommandError::invalid_response("Kickbase hat eine unlesbare Antwort geliefert.")
+        })?;
         if !status.is_success() {
-            if matches!(status, StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN) { return Err(CommandError::session_expired()); }
-            return Err(CommandError::http(status.as_u16(), http_error_message(status, &body)));
+            if matches!(status, StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN) {
+                return Err(CommandError::session_expired());
+            }
+            return Err(CommandError::http(
+                status.as_u16(),
+                http_error_message(status, &body),
+            ));
         }
-        if body.trim().is_empty() { return Ok(Value::Null); }
-        serde_json::from_str::<Value>(&body).or_else(|_| Ok(Value::String(body)))
+        if body.trim().is_empty() {
+            return Ok(Value::Null);
+        }
+        serde_json::from_str::<Value>(&body).or(Ok(Value::String(body)))
     }
-
 }
 
 fn http_error_message(status: StatusCode, body: &str) -> String {
@@ -188,7 +224,10 @@ fn http_error_message(status: StatusCode, body: &str) -> String {
         }
     }
 
-    format!("Kickbase hat die Anfrage abgelehnt (HTTP {}).", status.as_u16())
+    format!(
+        "Kickbase hat die Anfrage abgelehnt (HTTP {}).",
+        status.as_u16()
+    )
 }
 
 fn readable_network_error(error: &reqwest::Error) -> String {

@@ -9,8 +9,7 @@ import {
   useReactTable,
 } from "@tanstack/react-table";
 import { ArrowDown, ArrowUp, ArrowUpDown, ImageDown, Search, UserPlus, UsersRound } from "lucide-react";
-import type { NextFixture, PlayerPosition, SquadPlayer } from "./types";
-import { getLeagueNextMatchday } from "./api";
+import type { PlayerPosition, SquadPlayer } from "./types";
 import { getBundledTeamLogo } from "../../lib/team-assets";
 import { usePlayerDetail } from "../player-detail/PlayerDetailProvider";
 import { PlayerStatus } from "../../components/player-status/PlayerStatus";
@@ -20,6 +19,8 @@ import { useMarketDynamics } from "../analytics/use-market-dynamics";
 import { useMvPredictions } from "../analytics/use-mv-predictions";
 import { MvPredictionIndicator } from "../../components/mv-prediction/MvPredictionIndicator";
 import { PortraitManagerDrawer } from "../assets/PortraitManagerDrawer";
+import { getMarketValueHistories, getPlayerRecentForms } from "../analytics/api";
+import { MarketSparkline, RecentFormBars } from "../market/MarketMiniCharts";
 import "./squad.css";
 
 const POSITION_ORDER: Record<PlayerPosition, number> = {
@@ -51,11 +52,24 @@ export function SquadPage({ players, leagueId }: { players: SquadPlayer[]; leagu
   const [query, setQuery] = useState("");
   const [position, setPosition] = useState<"ALL" | PlayerPosition>("ALL");
   const [portraitManagerOpen, setPortraitManagerOpen] = useState(false);
+  const playerIds = useMemo(() => [...new Set(players.map((player) => player.id))].sort(), [players]);
+  const historiesQuery = useQuery({
+    queryKey: ["analytics", "market-value-histories", leagueId, playerIds],
+    queryFn: () => getMarketValueHistories(leagueId, playerIds),
+    enabled: Boolean(leagueId && playerIds.length),
+    staleTime: 30 * 60 * 1000,
+  });
+  const recentFormsQuery = useQuery({
+    queryKey: ["analytics", "player-recent-forms", leagueId, playerIds],
+    queryFn: () => getPlayerRecentForms(leagueId, playerIds),
+    enabled: Boolean(leagueId && playerIds.length),
+    staleTime: 30 * 60 * 1000,
+    retry: false,
+  });
   const dynamicsInputs = useMemo(() => players.map((player) => ({ id: player.id, marketValue: player.marketValue, marketValueChange24h: player.marketValueChange24h })), [players]);
-  const dynamicsByPlayer = useMarketDynamics(dynamicsInputs);
+  const dynamicsByPlayer = useMarketDynamics(leagueId, dynamicsInputs);
   const predictionInputs = useMemo(() => players.map((player) => ({ playerId: player.id, marketValue: player.marketValue, marketValueChange24h: player.marketValueChange24h })), [players]);
   const predictionQuery = useMvPredictions(leagueId, predictionInputs);
-  const fixturesQuery = useQuery({ queryKey: ["fixtures", "next", leagueId], queryFn: () => getLeagueNextMatchday(leagueId), staleTime: 10 * 60 * 1000 });
 
   const columns = useMemo<ColumnDef<SquadPlayer>[]>(() => [
     {
@@ -119,6 +133,12 @@ export function SquadPage({ players, leagueId }: { players: SquadPlayer[]; leagu
       cell: ({ row }) => <SignedValue value={row.original.marketValueChange24h} />,
     },
     {
+      id: "mvHistory",
+      header: "MW-Verlauf",
+      enableSorting: false,
+      cell: ({ row }) => <MarketSparkline points={historiesQuery.data?.[row.original.id] ?? []} prediction={predictionQuery.byPlayer.get(row.original.id)} currentValue={row.original.marketValue} />,
+    },
+    {
       id: "prediction",
       header: "22U",
       enableSorting: false,
@@ -137,12 +157,6 @@ export function SquadPage({ players, leagueId }: { players: SquadPlayer[]; leagu
       cell: ({ row }) => <SignedValue value={row.original.marketValueGainLoss} />,
     },
     {
-      id: "opponent",
-      accessorFn: (player) => opponentLabel(player.teamId, fixturesQuery.data?.fixtures ?? []),
-      header: fixturesQuery.data?.dayNumber ? `Gegner ST${fixturesQuery.data.dayNumber}` : "Nächster Gegner",
-      cell: ({ row }) => <span className="table-number">{opponentLabel(row.original.teamId, fixturesQuery.data?.fixtures ?? [])}</span>,
-    },
-    {
       accessorKey: "pointsTotal",
       header: "Punkte",
       sortingFn: (a, b) => compareNullableNumbers(a.original.pointsTotal, b.original.pointsTotal),
@@ -155,13 +169,19 @@ export function SquadPage({ players, leagueId }: { players: SquadPlayer[]; leagu
       cell: ({ row }) => <NumericCell value={row.original.averagePoints} decimals={1} />,
     },
     {
+      id: "recentForm",
+      header: "Form",
+      enableSorting: false,
+      cell: ({ row }) => <RecentFormBars entries={recentFormsQuery.data?.forms[row.original.id]} loading={recentFormsQuery.isLoading} unavailable={recentFormsQuery.data?.unavailablePlayerIds.includes(row.original.id)} />,
+    },
+    {
       id: "pointsPerMillion",
       accessorFn: (player) => pointsPerMillion(player.averagePoints, player.marketValue) ?? undefined,
       header: "Pkt/Mio",
       sortingFn: "basic", sortUndefined: "last",
       cell: ({ row }) => <NumericCell value={pointsPerMillion(row.original.averagePoints, row.original.marketValue)} decimals={1} />,
     },
-  ], [dynamicsByPlayer, fixturesQuery.data?.dayNumber, fixturesQuery.data?.fixtures, leagueId, predictionQuery.byPlayer, predictionQuery.data?.quality]);
+  ], [dynamicsByPlayer, historiesQuery.data, leagueId, predictionQuery.byPlayer, predictionQuery.data?.quality, recentFormsQuery.data, recentFormsQuery.isLoading]);
 
   const filteredPlayers = useMemo(() => {
     const needle = query.trim().toLocaleLowerCase("de-DE");
@@ -382,13 +402,4 @@ function formatNumber(value: number, decimals = 0) {
 function pointsPerMillion(averagePoints: number | null, marketValue: number | null) {
   if (averagePoints == null || marketValue == null || marketValue <= 0) return null;
   return averagePoints / (marketValue / 1_000_000);
-}
-
-function opponentLabel(teamId: string | null, fixtures: NextFixture[]) {
-  if (!teamId) return "—";
-  const fixture = fixtures.find((item) => item.homeTeamId === teamId || item.awayTeamId === teamId);
-  if (!fixture) return "—";
-  const home = fixture.homeTeamId === teamId;
-  const opponent = home ? fixture.awayTeamName : fixture.homeTeamName;
-  return `${home ? "vs." : "@"} ${opponent}`;
 }

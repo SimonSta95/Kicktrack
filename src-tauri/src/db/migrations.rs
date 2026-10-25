@@ -12,8 +12,9 @@ impl KickTrackDatabase {
         )
         .map_err(|_| CommandError::internal("Das Liga-Datenbankschema konnte nicht vorbereitet werden."))?;
 
-        self.conn.execute_batch(
-            "CREATE TABLE IF NOT EXISTS vnext_portrait_mappings (
+        self.conn
+            .execute_batch(
+                "CREATE TABLE IF NOT EXISTS vnext_portrait_mappings (
                 player_id TEXT PRIMARY KEY,
                 fotmob_id TEXT,
                 portrait_url TEXT,
@@ -49,18 +50,25 @@ impl KickTrackDatabase {
              CREATE INDEX IF NOT EXISTS idx_vnext_transfer_manager_date
              ON vnext_transfer_events(league_id, manager_id, transferred_at DESC);
              CREATE INDEX IF NOT EXISTS idx_vnext_transfer_player_date
-             ON vnext_transfer_events(player_id, transferred_at DESC);"
-        )
-        .map_err(|_| CommandError::internal("Das Analyse-Datenbankschema konnte nicht vorbereitet werden."))?;
+             ON vnext_transfer_events(player_id, transferred_at DESC);",
+            )
+            .map_err(|_| {
+                CommandError::internal(
+                    "Das Analyse-Datenbankschema konnte nicht vorbereitet werden.",
+                )
+            })?;
 
-        let applied: Option<i64> = self.conn
+        let applied: Option<i64> = self
+            .conn
             .query_row(
                 "SELECT version FROM vnext_schema_migrations WHERE version = 1",
                 [],
                 |row| row.get(0),
             )
             .optional()
-            .map_err(|_| CommandError::internal("Der Datenbank-Migrationsstand konnte nicht gelesen werden."))?;
+            .map_err(|_| {
+                CommandError::internal("Der Datenbank-Migrationsstand konnte nicht gelesen werden.")
+            })?;
 
         if applied.is_none() {
             self.import_legacy_reference_data()?;
@@ -71,14 +79,17 @@ impl KickTrackDatabase {
             .map_err(|_| CommandError::internal("Die Datenbankmigration konnte nicht abgeschlossen werden."))?;
         }
 
-        let logo_seed_applied: Option<i64> = self.conn
+        let logo_seed_applied: Option<i64> = self
+            .conn
             .query_row(
                 "SELECT version FROM vnext_schema_migrations WHERE version = 2",
                 [],
                 |row| row.get(0),
             )
             .optional()
-            .map_err(|_| CommandError::internal("Der Datenbank-Migrationsstand konnte nicht gelesen werden."))?;
+            .map_err(|_| {
+                CommandError::internal("Der Datenbank-Migrationsstand konnte nicht gelesen werden.")
+            })?;
 
         if logo_seed_applied.is_none() {
             self.import_legacy_team_logos()?;
@@ -89,14 +100,17 @@ impl KickTrackDatabase {
             .map_err(|_| CommandError::internal("Die Teamlogo-Migration konnte nicht abgeschlossen werden."))?;
         }
 
-        let manager_seed_applied: Option<i64> = self.conn
+        let manager_seed_applied: Option<i64> = self
+            .conn
             .query_row(
                 "SELECT version FROM vnext_schema_migrations WHERE version = 3",
                 [],
                 |row| row.get(0),
             )
             .optional()
-            .map_err(|_| CommandError::internal("Der Datenbank-Migrationsstand konnte nicht gelesen werden."))?;
+            .map_err(|_| {
+                CommandError::internal("Der Datenbank-Migrationsstand konnte nicht gelesen werden.")
+            })?;
 
         if manager_seed_applied.is_none() {
             self.import_legacy_managers()?;
@@ -107,14 +121,17 @@ impl KickTrackDatabase {
             .map_err(|_| CommandError::internal("Die Manager-Migration konnte nicht abgeschlossen werden."))?;
         }
 
-        let portrait_seed_applied: Option<i64> = self.conn
+        let portrait_seed_applied: Option<i64> = self
+            .conn
             .query_row(
                 "SELECT version FROM vnext_schema_migrations WHERE version = 4",
                 [],
                 |row| row.get(0),
             )
             .optional()
-            .map_err(|_| CommandError::internal("Der Portrait-Migrationsstand konnte nicht gelesen werden."))?;
+            .map_err(|_| {
+                CommandError::internal("Der Portrait-Migrationsstand konnte nicht gelesen werden.")
+            })?;
         if portrait_seed_applied.is_none() {
             self.import_legacy_portrait_mappings()?;
             self.conn.execute(
@@ -124,21 +141,73 @@ impl KickTrackDatabase {
             .map_err(|_| CommandError::internal("Die Portrait-Migration konnte nicht abgeschlossen werden."))?;
         }
 
-        let transfer_seed_applied: Option<i64> = self.conn
+        let transfer_seed_applied: Option<i64> = self
+            .conn
             .query_row(
                 "SELECT version FROM vnext_schema_migrations WHERE version = 5",
                 [],
                 |row| row.get(0),
             )
             .optional()
-            .map_err(|_| CommandError::internal("Der Transfer-Migrationsstand konnte nicht gelesen werden."))?;
+            .map_err(|_| {
+                CommandError::internal("Der Transfer-Migrationsstand konnte nicht gelesen werden.")
+            })?;
         if transfer_seed_applied.is_none() {
             self.import_legacy_transfer_events()?;
             self.conn.execute(
                 "INSERT INTO vnext_schema_migrations(version, applied_at) VALUES(5, datetime('now'))",
                 [],
             )
-            .map_err(|_| CommandError::internal("Die Transfer-Migration konnte nicht abgeschlossen werden."))?;
+                .map_err(|_| CommandError::internal("Die Transfer-Migration konnte nicht abgeschlossen werden."))?;
+        }
+
+        let history_schema_applied: Option<i64> = self
+            .conn
+            .query_row(
+                "SELECT version FROM vnext_schema_migrations WHERE version = 6",
+                [],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(|_| {
+                CommandError::internal("Der Historien-Migrationsstand konnte nicht gelesen werden.")
+            })?;
+        if history_schema_applied.is_none() {
+            self.conn
+                .execute_batch(
+                    "CREATE TABLE IF NOT EXISTS market_values (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    player_id TEXT NOT NULL,
+                    value INTEGER NOT NULL CHECK(value > 0),
+                    recorded_at TEXT NOT NULL,
+                    snapshot_date TEXT,
+                    source TEXT,
+                    UNIQUE(player_id, recorded_at)
+                 );
+                 CREATE INDEX IF NOT EXISTS idx_market_values_player_date
+                 ON market_values(player_id, snapshot_date DESC);
+
+                 CREATE TABLE IF NOT EXISTS dashboard_snapshots (
+                    league_id TEXT NOT NULL,
+                    snapshot_date TEXT NOT NULL,
+                    team_value INTEGER NOT NULL,
+                    budget INTEGER,
+                    total_assets INTEGER,
+                    recorded_at TEXT NOT NULL,
+                    PRIMARY KEY(league_id, snapshot_date)
+                 );
+                 CREATE INDEX IF NOT EXISTS idx_dashboard_snapshots_league_date
+                 ON dashboard_snapshots(league_id, snapshot_date DESC);",
+                )
+                .map_err(|_| {
+                    CommandError::internal(
+                        "Das Historien-Datenbankschema konnte nicht vorbereitet werden.",
+                    )
+                })?;
+            self.conn.execute(
+                "INSERT INTO vnext_schema_migrations(version, applied_at) VALUES(6, datetime('now'))",
+                [],
+            ).map_err(|_| CommandError::internal("Die Historien-Migration konnte nicht abgeschlossen werden."))?;
         }
 
         Ok(())
@@ -149,8 +218,9 @@ impl KickTrackDatabase {
             return Ok(());
         }
 
-        let tx = self.conn.transaction()
-            .map_err(|_| CommandError::internal("Die historischen Stammdaten konnten nicht migriert werden."))?;
+        let tx = self.conn.transaction().map_err(|_| {
+            CommandError::internal("Die historischen Stammdaten konnten nicht migriert werden.")
+        })?;
 
         {
             let mut team_stmt = tx
@@ -159,12 +229,17 @@ impl KickTrackDatabase {
                 )
                 .map_err(|_| CommandError::internal("Historische Teamdaten konnten nicht gelesen werden."))?;
             let rows = team_stmt
-                .query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?)))
-                .map_err(|_| CommandError::internal("Historische Teamdaten konnten nicht gelesen werden."))?;
+                .query_map([], |row| {
+                    Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?))
+                })
+                .map_err(|_| {
+                    CommandError::internal("Historische Teamdaten konnten nicht gelesen werden.")
+                })?;
 
             for row in rows {
-                let (team_id, club) = row
-                    .map_err(|_| CommandError::internal("Historische Teamdaten konnten nicht gelesen werden."))?;
+                let (team_id, club) = row.map_err(|_| {
+                    CommandError::internal("Historische Teamdaten konnten nicht gelesen werden.")
+                })?;
                 tx.execute(
                     "INSERT INTO vnext_teams (id, name, updated_at) VALUES (?1, ?2, datetime('now'))\n                     ON CONFLICT(id) DO UPDATE SET\n                       name = COALESCE(excluded.name, vnext_teams.name),\n                       updated_at = datetime('now')",
                     params![team_id, club],
@@ -191,11 +266,17 @@ impl KickTrackDatabase {
                         row.get::<_, Option<String>>(6)?,
                     ))
                 })
-                .map_err(|_| CommandError::internal("Historische Spielerdaten konnten nicht gelesen werden."))?;
+                .map_err(|_| {
+                    CommandError::internal("Historische Spielerdaten konnten nicht gelesen werden.")
+                })?;
 
             for row in rows {
                 let (id, name, full_name, team_id, position, portrait_path, fotmob_id) = row
-                    .map_err(|_| CommandError::internal("Historische Spielerdaten konnten nicht gelesen werden."))?;
+                    .map_err(|_| {
+                        CommandError::internal(
+                            "Historische Spielerdaten konnten nicht gelesen werden.",
+                        )
+                    })?;
                 tx.execute(
                     "INSERT INTO vnext_players\n                       (id, display_name, full_name, team_id, position, portrait_path, legacy_fotmob_id, updated_at)\n                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, datetime('now'))\n                     ON CONFLICT(id) DO UPDATE SET\n                       display_name = excluded.display_name,\n                       full_name = excluded.full_name,\n                       team_id = excluded.team_id,\n                       position = excluded.position,\n                       portrait_path = excluded.portrait_path,\n                       legacy_fotmob_id = excluded.legacy_fotmob_id,\n                       updated_at = datetime('now')",
                     params![id, name, full_name, team_id, position, portrait_path, fotmob_id],
@@ -204,35 +285,62 @@ impl KickTrackDatabase {
             }
         }
 
-        tx.commit()
-            .map_err(|_| CommandError::internal("Die historischen Stammdaten konnten nicht migriert werden."))?;
+        tx.commit().map_err(|_| {
+            CommandError::internal("Die historischen Stammdaten konnten nicht migriert werden.")
+        })?;
         Ok(())
     }
-
 
     fn import_legacy_managers(&mut self) -> Result<(), CommandError> {
         if !self.table_exists("league_managers")? {
             return Ok(());
         }
 
-        let tx = self.conn.transaction()
-            .map_err(|_| CommandError::internal("Historische Managerdaten konnten nicht migriert werden."))?;
+        let tx = self.conn.transaction().map_err(|_| {
+            CommandError::internal("Historische Managerdaten konnten nicht migriert werden.")
+        })?;
         {
             let mut stmt = tx.prepare(
                 "SELECT league_id, manager_id, name, profile_image, is_user, team_value, profit, points, average_points, matchday_wins, place, updated_at\n                 FROM league_managers"
             ).map_err(|_| CommandError::internal("Historische Managerdaten konnten nicht gelesen werden."))?;
-            let rows = stmt.query_map([], |row| {
-                Ok((
-                    row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?,
-                    row.get::<_, Option<String>>(3)?, row.get::<_, i64>(4)?, row.get::<_, Option<i64>>(5)?,
-                    row.get::<_, Option<i64>>(6)?, row.get::<_, Option<i64>>(7)?, row.get::<_, Option<f64>>(8)?,
-                    row.get::<_, Option<i64>>(9)?, row.get::<_, Option<i64>>(10)?, row.get::<_, String>(11)?,
-                ))
-            }).map_err(|_| CommandError::internal("Historische Managerdaten konnten nicht gelesen werden."))?;
+            let rows = stmt
+                .query_map([], |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, Option<String>>(3)?,
+                        row.get::<_, i64>(4)?,
+                        row.get::<_, Option<i64>>(5)?,
+                        row.get::<_, Option<i64>>(6)?,
+                        row.get::<_, Option<i64>>(7)?,
+                        row.get::<_, Option<f64>>(8)?,
+                        row.get::<_, Option<i64>>(9)?,
+                        row.get::<_, Option<i64>>(10)?,
+                        row.get::<_, String>(11)?,
+                    ))
+                })
+                .map_err(|_| {
+                    CommandError::internal("Historische Managerdaten konnten nicht gelesen werden.")
+                })?;
 
             for row in rows {
-                let (league_id, manager_id, name, profile_image, is_user, team_value, profit, points, average_points, matchday_wins, place, updated_at) = row
-                    .map_err(|_| CommandError::internal("Historische Managerdaten konnten nicht gelesen werden."))?;
+                let (
+                    league_id,
+                    manager_id,
+                    name,
+                    profile_image,
+                    is_user,
+                    team_value,
+                    profit,
+                    points,
+                    average_points,
+                    matchday_wins,
+                    place,
+                    updated_at,
+                ) = row.map_err(|_| {
+                    CommandError::internal("Historische Managerdaten konnten nicht gelesen werden.")
+                })?;
                 tx.execute(
                     "INSERT INTO vnext_managers (league_id, id, name, profile_image_remote_path, is_self, updated_at)\n                     VALUES (?1, ?2, ?3, ?4, ?5, ?6)\n                     ON CONFLICT(league_id, id) DO UPDATE SET\n                       name = excluded.name,\n                       profile_image_remote_path = COALESCE(excluded.profile_image_remote_path, vnext_managers.profile_image_remote_path),\n                       is_self = MAX(vnext_managers.is_self, excluded.is_self),\n                       updated_at = excluded.updated_at",
                     params![league_id, manager_id, name, profile_image, is_user, updated_at],
@@ -244,11 +352,12 @@ impl KickTrackDatabase {
                 ).map_err(|_| CommandError::internal("Historische Manager-Snapshots konnten nicht migriert werden."))?;
             }
         }
-        tx.commit().map_err(|_| CommandError::internal("Historische Managerdaten konnten nicht migriert werden."))?;
+        tx.commit().map_err(|_| {
+            CommandError::internal("Historische Managerdaten konnten nicht migriert werden.")
+        })?;
         Ok(())
     }
 
-    
     fn import_legacy_portrait_mappings(&mut self) -> Result<(), CommandError> {
         if !self.table_exists("player_master")? {
             return Ok(());
@@ -271,22 +380,28 @@ impl KickTrackDatabase {
 
     fn import_legacy_transfer_events(&mut self) -> Result<(), CommandError> {
         if self.table_exists("league_manager_transfers")? {
-            self.conn.execute_batch(
-                "INSERT OR IGNORE INTO vnext_transfer_events(
+            self.conn
+                .execute_batch(
+                    "INSERT OR IGNORE INTO vnext_transfer_events(
                     league_id, manager_id, player_id, player_name, team_id, club_name,
                     transfer_type, price, transferred_at, observed_at, source
                  )
                  SELECT league_id, manager_id, player_id, player_name, team_id, club,
                         upper(transfer_type), price, transferred_at, observed_at,
                         'legacy_league_manager_transfers'
-                 FROM league_manager_transfers;"
-            )
-            .map_err(|_| CommandError::internal("Historische Liga-Transfers konnten nicht migriert werden."))?;
+                 FROM league_manager_transfers;",
+                )
+                .map_err(|_| {
+                    CommandError::internal(
+                        "Historische Liga-Transfers konnten nicht migriert werden.",
+                    )
+                })?;
         }
 
         if self.table_exists("manager_transfers")? {
-            self.conn.execute_batch(
-                "INSERT OR IGNORE INTO vnext_transfer_events(
+            self.conn
+                .execute_batch(
+                    "INSERT OR IGNORE INTO vnext_transfer_events(
                     league_id, manager_id, player_id, player_name, team_id, club_name,
                     transfer_type, price, transferred_at, observed_at, source
                  )
@@ -299,9 +414,13 @@ impl KickTrackDatabase {
                         mt.player_id, mt.player_name, mt.team_id, mt.club,
                         upper(mt.transfer_type), mt.price, mt.transferred_at, mt.transferred_at,
                         'legacy_manager_transfers'
-                 FROM manager_transfers mt;"
-            )
-            .map_err(|_| CommandError::internal("Historische eigene Transfers konnten nicht migriert werden."))?;
+                 FROM manager_transfers mt;",
+                )
+                .map_err(|_| {
+                    CommandError::internal(
+                        "Historische eigene Transfers konnten nicht migriert werden.",
+                    )
+                })?;
         }
         Ok(())
     }
@@ -328,21 +447,26 @@ impl KickTrackDatabase {
                  ORDER BY observations DESC"
             );
 
-            let mut stmt = self.conn.prepare(&sql)
-                .map_err(|_| CommandError::internal("Historische Teamlogos konnten nicht gelesen werden."))?;
-            let rows = stmt.query_map([], |row| {
-                Ok((
-                    row.get::<_, String>(0)?,
-                    row.get::<_, String>(1)?,
-                    row.get::<_, Option<String>>(2)?,
-                    row.get::<_, i64>(3)?,
-                ))
-            })
-            .map_err(|_| CommandError::internal("Historische Teamlogos konnten nicht gelesen werden."))?;
+            let mut stmt = self.conn.prepare(&sql).map_err(|_| {
+                CommandError::internal("Historische Teamlogos konnten nicht gelesen werden.")
+            })?;
+            let rows = stmt
+                .query_map([], |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, Option<String>>(2)?,
+                        row.get::<_, i64>(3)?,
+                    ))
+                })
+                .map_err(|_| {
+                    CommandError::internal("Historische Teamlogos konnten nicht gelesen werden.")
+                })?;
 
             for row in rows {
-                let (team_id, image_path, club, observations) = row
-                    .map_err(|_| CommandError::internal("Historische Teamlogos konnten nicht gelesen werden."))?;
+                let (team_id, image_path, club, observations) = row.map_err(|_| {
+                    CommandError::internal("Historische Teamlogos konnten nicht gelesen werden.")
+                })?;
 
                 let replace = best_by_team
                     .get(&team_id)
@@ -355,8 +479,9 @@ impl KickTrackDatabase {
             }
         }
 
-        let tx = self.conn.transaction()
-            .map_err(|_| CommandError::internal("Historische Teamlogos konnten nicht migriert werden."))?;
+        let tx = self.conn.transaction().map_err(|_| {
+            CommandError::internal("Historische Teamlogos konnten nicht migriert werden.")
+        })?;
 
         for (team_id, (remote_path, club, _)) in best_by_team {
             tx.execute(
@@ -368,23 +493,29 @@ impl KickTrackDatabase {
                    updated_at = datetime('now')",
                 params![team_id, club, remote_path],
             )
-            .map_err(|_| CommandError::internal("Historische Teamlogos konnten nicht migriert werden."))?;
+            .map_err(|_| {
+                CommandError::internal("Historische Teamlogos konnten nicht migriert werden.")
+            })?;
         }
 
-        tx.commit()
-            .map_err(|_| CommandError::internal("Historische Teamlogos konnten nicht migriert werden."))?;
+        tx.commit().map_err(|_| {
+            CommandError::internal("Historische Teamlogos konnten nicht migriert werden.")
+        })?;
         Ok(())
     }
 
     pub(super) fn table_exists(&self, table: &str) -> Result<bool, CommandError> {
-        let exists: Option<String> = self.conn
+        let exists: Option<String> = self
+            .conn
             .query_row(
                 "SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?1",
                 [table],
                 |row| row.get(0),
             )
             .optional()
-            .map_err(|_| CommandError::internal("Die Datenbankstruktur konnte nicht gelesen werden."))?;
+            .map_err(|_| {
+                CommandError::internal("Die Datenbankstruktur konnte nicht gelesen werden.")
+            })?;
         Ok(exists.is_some())
     }
 }

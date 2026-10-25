@@ -10,23 +10,11 @@ use crate::{
     kickbase::{
         error::CommandError,
         squad::{parse_squad, parse_team_logos, SquadResponse},
+        validation::api_id,
     },
     portraits::sync_portraits_for_player_ids,
     state::AppState,
 };
-
-fn current_token(state: &State<'_, AppState>) -> Result<String, CommandError> {
-    let session = state
-        .session
-        .lock()
-        .map_err(|_| CommandError::internal("Die lokale Session konnte nicht gelesen werden."))?;
-
-    session
-        .as_ref()
-        .map(|session| session.token.clone())
-        .ok_or_else(CommandError::session_expired)
-}
-
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -51,11 +39,8 @@ pub async fn league_next_matchday(
     league_id: String,
     state: State<'_, AppState>,
 ) -> Result<NextMatchdayResponse, CommandError> {
-    if league_id.trim().is_empty() {
-        return Err(CommandError::http(400, "Eine Liga-ID ist erforderlich."));
-    }
-
-    let token = current_token(&state)?;
+    let league_id = api_id(&league_id, "Liga-ID")?;
+    let token = state.active_token().await?;
     let payload = state
         .kickbase
         .get_json(&token, "/v4/competitions/1/matchdays")
@@ -66,7 +51,7 @@ pub async fn league_next_matchday(
     #[cfg(debug_assertions)]
     crate::kt_debug!(
         "[KickTrack][DEBUG][fixtures] league={} day={:?} fixtures={}",
-        league_id.trim(),
+        league_id,
         result.day_number,
         result.fixtures.len()
     );
@@ -81,7 +66,10 @@ fn parse_next_matchday(payload: &Value) -> NextMatchdayResponse {
         .or_else(|| payload.as_array());
 
     let Some(days) = days else {
-        return NextMatchdayResponse { day_number: None, fixtures: Vec::new() };
+        return NextMatchdayResponse {
+            day_number: None,
+            fixtures: Vec::new(),
+        };
     };
 
     // Kickbase has shipped both `it` and `ms` as the match collection in this
@@ -89,12 +77,17 @@ fn parse_next_matchday(payload: &Value) -> NextMatchdayResponse {
     // match. This also keeps partially played matchdays visible until complete.
     let selected = days.iter().find(|day| {
         day_matches(day).is_some_and(|matches| {
-            matches.iter().any(|fixture| match_status(fixture) != Some(2))
+            matches
+                .iter()
+                .any(|fixture| match_status(fixture) != Some(2))
         })
     });
 
     let Some(day) = selected else {
-        return NextMatchdayResponse { day_number: None, fixtures: Vec::new() };
+        return NextMatchdayResponse {
+            day_number: None,
+            fixtures: Vec::new(),
+        };
     };
 
     let day_number = int_value(day, &["day", "dn", "dayNumber"]);
@@ -104,7 +97,10 @@ fn parse_next_matchday(payload: &Value) -> NextMatchdayResponse {
         .filter_map(parse_fixture)
         .collect();
 
-    NextMatchdayResponse { day_number, fixtures }
+    NextMatchdayResponse {
+        day_number,
+        fixtures,
+    }
 }
 
 fn day_matches(day: &Value) -> Option<&Vec<Value>> {
@@ -126,16 +122,10 @@ fn parse_fixture(fixture: &Value) -> Option<NextFixture> {
         match_id: scalar_string(fixture, &["mi", "id", "matchId"]).unwrap_or_default(),
         home_team_id,
         away_team_id,
-        home_team_name: scalar_string(
-            fixture,
-            &["t1sy", "t1n", "homeTeamName", "home_team_name"],
-        )
-        .unwrap_or_else(|| "Heimteam".to_string()),
-        away_team_name: scalar_string(
-            fixture,
-            &["t2sy", "t2n", "awayTeamName", "away_team_name"],
-        )
-        .unwrap_or_else(|| "Auswärtsteam".to_string()),
+        home_team_name: scalar_string(fixture, &["t1sy", "t1n", "homeTeamName", "home_team_name"])
+            .unwrap_or_else(|| "Heimteam".to_string()),
+        away_team_name: scalar_string(fixture, &["t2sy", "t2n", "awayTeamName", "away_team_name"])
+            .unwrap_or_else(|| "Auswärtsteam".to_string()),
         kickoff: scalar_string(fixture, &["dt", "md", "date", "kickoff"]),
     })
 }
@@ -155,12 +145,8 @@ pub async fn league_squad(
     league_id: String,
     state: State<'_, AppState>,
 ) -> Result<SquadResponse, CommandError> {
-    if league_id.trim().is_empty() {
-        return Err(CommandError::http(400, "Eine Liga-ID ist erforderlich."));
-    }
-
-    let token = current_token(&state)?;
-    let league_id = league_id.trim();
+    let league_id = api_id(&league_id, "Liga-ID")?;
+    let token = state.active_token().await?;
     let payload = state
         .kickbase
         .get_json(&token, &format!("/v4/leagues/{league_id}/squad"))
@@ -191,11 +177,20 @@ pub async fn league_squad(
     // Live Kickbase payloads are authoritative for player existence. Register
     // every currently seen player before enrichment, so post-transfer-window
     // arrivals are not limited to the historical DB snapshot.
-    let portrait_ids = squad.players.iter().map(|player| player.id.clone()).collect::<Vec<_>>();
+    let portrait_ids = squad
+        .players
+        .iter()
+        .map(|player| player.id.clone())
+        .collect::<Vec<_>>();
     for player in &squad.players {
         let full_name = player.first_name.as_deref().map(|first| {
             let first = first.trim();
-            if first.is_empty() || player.name.to_lowercase().starts_with(&format!("{} ", first.to_lowercase())) {
+            if first.is_empty()
+                || player
+                    .name
+                    .to_lowercase()
+                    .starts_with(&format!("{} ", first.to_lowercase()))
+            {
                 player.name.clone()
             } else {
                 format!("{first} {}", player.name)
@@ -220,8 +215,9 @@ pub async fn league_squad(
 
     // Incremental auto-sync: only newly seen/missing player IDs reach FotMob.
     // Cached, rejected and manual-review mappings are skipped by the DB query.
-    match sync_portraits_for_player_ids(league_id, &portrait_ids, &state).await {
-        Ok(summary) => {
+    match sync_portraits_for_player_ids(&league_id, &portrait_ids, &state).await {
+        Ok(summary) =>
+        {
             #[cfg(debug_assertions)]
             if summary.requested > 0 {
                 crate::kt_debug!(
@@ -244,8 +240,11 @@ pub async fn league_squad(
 
     for player in &mut squad.players {
         let enrichment = db.player_enrichment(&player.id, player.team_id.as_deref())?;
-        if player.first_name.is_none() { player.first_name = sanitize_first_name(enrichment.first_name.clone(), &player.name); }
-        else { player.first_name = sanitize_first_name(player.first_name.take(), &player.name); }
+        if player.first_name.is_none() {
+            player.first_name = sanitize_first_name(enrichment.first_name.clone(), &player.name);
+        } else {
+            player.first_name = sanitize_first_name(player.first_name.take(), &player.name);
+        }
         player.club_name = enrichment.club_name;
         player.portrait_data_url = enrichment.portrait_data_url;
 
@@ -271,7 +270,9 @@ pub async fn league_squad(
                     if let Ok(cache_path) = db.team_logo_cache_path(&team_id, remote_path) {
                         match fs::write(&cache_path, &bytes) {
                             Ok(()) => {
-                                if let Err(error) = db.set_team_logo_local_path(&team_id, &cache_path) {
+                                if let Err(error) =
+                                    db.set_team_logo_local_path(&team_id, &cache_path)
+                                {
                                     #[cfg(debug_assertions)]
                                     crate::kt_debug!(
                                         "[KickTrack][DEBUG][squad:logos] local path write failed team={}: {:?}",
@@ -303,15 +304,21 @@ pub async fn league_squad(
     // The compact squad payload omits `fn` for many players. Resolve all missing
     // first names with one competition-catalog request instead of N player-detail
     // requests. This keeps the squad/sales UI complete without a request fan-out.
-    if squad.players.iter().any(|player| player.first_name.is_none()) {
-        if let Ok(catalog) = state.kickbase
+    if squad
+        .players
+        .iter()
+        .any(|player| player.first_name.is_none())
+    {
+        if let Ok(catalog) = state
+            .kickbase
             .get_json(&token, "/v4/competitions/1/players?position=0&sorting=1")
             .await
         {
             let names = competition_first_names(&catalog);
             for player in &mut squad.players {
                 if player.first_name.is_none() {
-                    player.first_name = names.get(&player.id)
+                    player.first_name = names
+                        .get(&player.id)
                         .cloned()
                         .flatten()
                         .and_then(|first| sanitize_first_name(Some(first), &player.name));
@@ -328,36 +335,46 @@ fn competition_first_names(payload: &Value) -> HashMap<String, Option<String>> {
         .get("it")
         .and_then(Value::as_array)
         .or_else(|| payload.as_array());
-    let Some(items) = items else { return HashMap::new(); };
+    let Some(items) = items else {
+        return HashMap::new();
+    };
 
-    items.iter().filter_map(|item| {
-        let id = scalar_string(item, &["i", "pi", "id"])?;
-        let display = scalar_string(item, &["n", "pn", "name"]).unwrap_or_default();
-        let first = scalar_string(item, &["fn", "firstName"]);
-        Some((id, sanitize_first_name(first, &display)))
-    }).collect()
+    items
+        .iter()
+        .filter_map(|item| {
+            let id = scalar_string(item, &["i", "pi", "id"])?;
+            let display = scalar_string(item, &["n", "pn", "name"]).unwrap_or_default();
+            let first = scalar_string(item, &["fn", "firstName"]);
+            Some((id, sanitize_first_name(first, &display)))
+        })
+        .collect()
 }
 
 fn scalar_string(value: &Value, keys: &[&str]) -> Option<String> {
-    keys.iter().find_map(|key| value.get(*key).and_then(|candidate| match candidate {
-        Value::String(text) if !text.trim().is_empty() => Some(text.trim().to_string()),
-        Value::Number(number) => Some(number.to_string()),
-        _ => None,
-    }))
+    keys.iter().find_map(|key| {
+        value.get(*key).and_then(|candidate| match candidate {
+            Value::String(text) if !text.trim().is_empty() => Some(text.trim().to_string()),
+            Value::Number(number) => Some(number.to_string()),
+            _ => None,
+        })
+    })
 }
 
 fn sanitize_first_name(first_name: Option<String>, display_name: &str) -> Option<String> {
     let first = first_name?.trim().to_string();
-    if first.is_empty() { return None; }
+    if first.is_empty() {
+        return None;
+    }
     let display = display_name.trim();
     if display.eq_ignore_ascii_case(&first)
-        || display.to_lowercase().starts_with(&format!("{} ", first.to_lowercase()))
+        || display
+            .to_lowercase()
+            .starts_with(&format!("{} ", first.to_lowercase()))
     {
         return None;
     }
     Some(first)
 }
-
 
 #[cfg(test)]
 mod next_matchday_tests {
@@ -406,6 +423,9 @@ mod next_matchday_tests {
         let result = parse_next_matchday(&payload);
         assert_eq!(result.day_number, Some(3));
         assert_eq!(result.fixtures[0].home_team_name, "Frankfurt");
-        assert_eq!(result.fixtures[0].kickoff.as_deref(), Some("2026-09-18T18:30:00Z"));
+        assert_eq!(
+            result.fixtures[0].kickoff.as_deref(),
+            Some("2026-09-18T18:30:00Z")
+        );
     }
 }

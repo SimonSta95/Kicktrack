@@ -9,13 +9,13 @@ export type DynamicsPlayerInput = {
   marketValueChange24h: number | null;
 };
 
-export function useMarketDynamics(players: DynamicsPlayerInput[]) {
+export function useMarketDynamics(leagueId: string, players: DynamicsPlayerInput[]) {
   const ids = useMemo(() => [...new Set(players.map((player) => player.id).filter(Boolean))].sort(), [players]);
   const historiesQuery = useQuery({
-    queryKey: ["analytics", "market-value-histories", ids],
-    queryFn: () => getMarketValueHistories(ids),
-    enabled: ids.length > 0,
-    staleTime: 5 * 60 * 1000,
+    queryKey: ["analytics", "market-value-histories", leagueId, ids],
+    queryFn: () => getMarketValueHistories(leagueId, ids),
+    enabled: Boolean(leagueId && ids.length),
+    staleTime: 30 * 60 * 1000,
   });
 
   return useMemo(() => {

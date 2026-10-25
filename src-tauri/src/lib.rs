@@ -1,21 +1,21 @@
 mod commands;
 mod db;
 mod kickbase;
-mod state;
+mod logging;
 mod mv_prediction;
-mod trading;
 mod portraits;
 mod refresh;
-mod logging;
+mod state;
+mod trading;
 
 use state::AppState;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    db::KickTrackDatabase::open_default().expect("failed to initialize KickTrack database");
     let app_state = AppState::new().expect("failed to initialize KickTrack application state");
 
     tauri::Builder::default()
-        .plugin(tauri_plugin_opener::init())
         .manage(app_state)
         .invoke_handler(tauri::generate_handler![
             commands::auth::login,
@@ -30,6 +30,7 @@ pub fn run() {
             commands::league::league_overview,
             commands::league::manager_squad,
             commands::player::player_detail,
+            commands::player::player_recent_forms,
             commands::player::market_value_histories,
             commands::player::player_performance_breakdown,
             commands::market::league_market,

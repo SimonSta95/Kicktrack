@@ -4,6 +4,7 @@ pub mod dto;
 pub mod error;
 
 pub mod squad;
+pub mod validation;
 
 pub mod league;
 

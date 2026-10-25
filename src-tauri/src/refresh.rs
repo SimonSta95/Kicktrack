@@ -9,6 +9,7 @@ use crate::{
         league::{merge_manager_dashboard, parse_league_managers},
         market::parse_market,
         squad::parse_squad,
+        validation::api_id,
     },
     state::AppState,
 };
@@ -23,29 +24,14 @@ pub struct ForceRefreshResult {
     pub market_value_snapshots: usize,
 }
 
-fn current_token(state: &State<'_, AppState>) -> Result<String, CommandError> {
-    let session = state
-        .session
-        .lock()
-        .map_err(|_| CommandError::internal("Die lokale Session konnte nicht gelesen werden."))?;
-
-    session
-        .as_ref()
-        .map(|session| session.token.clone())
-        .ok_or_else(CommandError::session_expired)
-}
-
 #[tauri::command]
 pub async fn force_refresh_league(
     league_id: String,
     state: State<'_, AppState>,
 ) -> Result<ForceRefreshResult, CommandError> {
-    let league_id = league_id.trim().to_owned();
-    if league_id.is_empty() {
-        return Err(CommandError::http(400, "Eine Liga-ID ist erforderlich."));
-    }
+    let league_id = api_id(&league_id, "Liga-ID")?;
 
-    let token = current_token(&state)?;
+    let token = state.active_token().await?;
 
     // Important: perform all network awaits before opening SQLite. rusqlite's
     // Connection is intentionally not held across .await boundaries.
@@ -67,7 +53,10 @@ pub async fn force_refresh_league(
         .await?;
     let managers_payload = state
         .kickbase
-        .get_json(&token, &format!("/v4/leagues/{league_id}/settings/managers"))
+        .get_json(
+            &token,
+            &format!("/v4/leagues/{league_id}/settings/managers"),
+        )
         .await?;
     let ranking_payload = match state
         .kickbase
@@ -108,10 +97,11 @@ pub async fn force_refresh_league(
     // Keep the persisted league snapshot aligned with the same specific
     // manager resource used by the League page.
     for manager in &mut managers {
-        let path = format!(
-            "/v4/leagues/{league_id}/managers/{}/dashboard",
-            manager.id
-        );
+        let manager_id = match api_id(&manager.id, "Manager-ID") {
+            Ok(manager_id) => manager_id,
+            Err(_) => continue,
+        };
+        let path = format!("/v4/leagues/{league_id}/managers/{manager_id}/dashboard");
         match state.kickbase.get_json(&token, &path).await {
             Ok(payload) => {
                 merge_manager_dashboard(manager, &payload);
@@ -130,7 +120,8 @@ pub async fn force_refresh_league(
                 #[cfg(debug_assertions)]
                 crate::kt_debug!(
                     "[KickTrack][DEBUG][force-refresh:manager] id={} failed={:?}",
-                    manager.id, error
+                    manager.id,
+                    error
                 );
             }
         }
@@ -144,7 +135,10 @@ pub async fn force_refresh_league(
     }
     for entry in &market.entries {
         if let Some(value) = entry.market_value.filter(|value| *value > 0) {
-            if !snapshots.iter().any(|(player_id, _)| player_id == &entry.player_id) {
+            if !snapshots
+                .iter()
+                .any(|(player_id, _)| player_id == &entry.player_id)
+            {
                 snapshots.push((entry.player_id.clone(), value));
             }
         }
@@ -159,11 +153,7 @@ pub async fn force_refresh_league(
 
     let mut db = KickTrackDatabase::open_default()?;
     let snapshot_count = db.record_force_refresh_market_values(&snapshots)?;
-    db.record_force_refresh_dashboard(
-        &league_id,
-        squad_value,
-        account.budget,
-    )?;
+    db.record_force_refresh_dashboard(&league_id, squad_value, account.budget)?;
     if !managers.is_empty() {
         db.upsert_league_managers(&league_id, &managers)?;
     }

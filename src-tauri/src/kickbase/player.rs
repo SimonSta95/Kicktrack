@@ -1,7 +1,7 @@
-use std::collections::{BTreeMap, HashMap};
+use super::error::CommandError;
 use serde::Serialize;
 use serde_json::Value;
-use super::error::CommandError;
+use std::collections::{BTreeMap, HashMap};
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -39,11 +39,20 @@ pub struct PerformanceEntry {
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct BreakdownItem { pub id: String, pub label: String, pub points: i64, pub count: Option<i64> }
+pub struct BreakdownItem {
+    pub id: String,
+    pub label: String,
+    pub points: i64,
+    pub count: Option<i64>,
+}
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct PerformanceBreakdown { pub day_number: i64, pub total_points: Option<i64>, pub items: Vec<BreakdownItem> }
+pub struct PerformanceBreakdown {
+    pub day_number: i64,
+    pub total_points: Option<i64>,
+    pub items: Vec<BreakdownItem>,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MarketValueHistoryEntry {
@@ -126,7 +135,8 @@ fn unix_day_to_iso(days: i64) -> Option<String> {
     let z = days + 719_468;
     let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
     let day_of_era = z - era * 146_097;
-    let year_of_era = (day_of_era - day_of_era / 1_460 + day_of_era / 36_524 - day_of_era / 146_096) / 365;
+    let year_of_era =
+        (day_of_era - day_of_era / 1_460 + day_of_era / 36_524 - day_of_era / 146_096) / 365;
     let mut year = year_of_era + era * 400;
     let day_of_year = day_of_era - (365 * year_of_era + year_of_era / 4 - year_of_era / 100);
     let month_prime = (5 * day_of_year + 2) / 153;
@@ -140,19 +150,30 @@ fn unix_day_to_iso(days: i64) -> Option<String> {
 pub fn parse_player_detail(value: &Value, player_id: &str) -> Result<PlayerDetail, CommandError> {
     let root = value.get("p").filter(|v| v.is_object()).unwrap_or(value);
     Ok(PlayerDetail {
-        id: string_value(root, &["i","pi","id"]).unwrap_or_else(|| player_id.to_string()),
-        name: string_value(root, &["pn","n","name"]).or_else(|| { let first=string_value(root,&["fn","firstName"]); let last=string_value(root,&["ln","lastName"]); match (first,last) { (Some(f),Some(l)) => Some(format!("{f} {l}")), (None,Some(l)) => Some(l), (Some(f),None) => Some(f), _ => None } }).unwrap_or_else(|| format!("Spieler {player_id}")),
-        first_name: string_value(root, &["fn","firstName"]),
-        team_id: string_value(root, &["tid","ti","teamId"]),
+        id: string_value(root, &["i", "pi", "id"]).unwrap_or_else(|| player_id.to_string()),
+        name: string_value(root, &["pn", "n", "name"])
+            .or_else(|| {
+                let first = string_value(root, &["fn", "firstName"]);
+                let last = string_value(root, &["ln", "lastName"]);
+                match (first, last) {
+                    (Some(f), Some(l)) => Some(format!("{f} {l}")),
+                    (None, Some(l)) => Some(l),
+                    (Some(f), None) => Some(f),
+                    _ => None,
+                }
+            })
+            .unwrap_or_else(|| format!("Spieler {player_id}")),
+        first_name: string_value(root, &["fn", "firstName"]),
+        team_id: string_value(root, &["tid", "ti", "teamId"]),
         club_name: None,
         portrait_data_url: None,
-        position: integer_value(root, &["pos","position"]),
-        market_value: integer_value(root, &["mv","marketValue"]),
-        market_value_change_24h: integer_value(root, &["tfhmvt","marketValueChange24h"]),
-        market_value_gain_loss: integer_value(root, &["mvgl","marketValueGainLoss"]),
-        points_total: integer_value(root, &["p","tp","points","totalPoints"]),
-        average_points: number_value(root, &["ap","averagePoints"]),
-        status: integer_value(root, &["st","status"]),
+        position: integer_value(root, &["pos", "position"]),
+        market_value: integer_value(root, &["mv", "marketValue"]),
+        market_value_change_24h: integer_value(root, &["tfhmvt", "marketValueChange24h"]),
+        market_value_gain_loss: integer_value(root, &["mvgl", "marketValueGainLoss"]),
+        points_total: integer_value(root, &["p", "tp", "points", "totalPoints"]),
+        average_points: number_value(root, &["ap", "averagePoints"]),
+        status: integer_value(root, &["st", "status"]),
         status_list: status_codes(root),
         status_text: status_text(root),
     })
@@ -161,23 +182,39 @@ pub fn parse_player_detail(value: &Value, player_id: &str) -> Result<PlayerDetai
 fn status_codes(value: &Value) -> Vec<i64> {
     for key in ["stl", "statusList"] {
         if let Some(items) = value.get(key).and_then(Value::as_array) {
-            return items.iter().filter_map(|candidate| match candidate {
-                Value::Number(number) => number.as_i64(),
-                Value::String(text) => text.parse::<i64>().ok(),
-                Value::Object(_) => integer_value(candidate, &["st", "status", "i", "id"]),
-                _ => None,
-            }).collect();
+            return items
+                .iter()
+                .filter_map(|candidate| match candidate {
+                    Value::Number(number) => number.as_i64(),
+                    Value::String(text) => text.parse::<i64>().ok(),
+                    Value::Object(_) => integer_value(candidate, &["st", "status", "i", "id"]),
+                    _ => None,
+                })
+                .collect();
         }
     }
     Vec::new()
 }
 
 fn status_text(value: &Value) -> Option<String> {
-    string_value(value, &["stxt", "statusText", "status_text"])
-        .or_else(|| value.get("stl").and_then(Value::as_array).and_then(|items| {
-            let texts = items.iter().filter_map(|candidate| string_value(candidate, &["stxt", "txt", "text", "label", "name"])).collect::<Vec<_>>();
-            if texts.is_empty() { None } else { Some(texts.join(" · ")) }
-        }))
+    string_value(value, &["stxt", "statusText", "status_text"]).or_else(|| {
+        value
+            .get("stl")
+            .and_then(Value::as_array)
+            .and_then(|items| {
+                let texts = items
+                    .iter()
+                    .filter_map(|candidate| {
+                        string_value(candidate, &["stxt", "txt", "text", "label", "name"])
+                    })
+                    .collect::<Vec<_>>();
+                if texts.is_empty() {
+                    None
+                } else {
+                    Some(texts.join(" · "))
+                }
+            })
+    })
 }
 
 pub fn parse_performance(value: &Value) -> Vec<PerformanceEntry> {
@@ -195,28 +232,32 @@ pub fn parse_performance(value: &Value) -> Vec<PerformanceEntry> {
         (None, _) => i64::MAX,
     };
 
-    let mut out = history.iter().filter_map(|item| {
-        let day = integer_value(item, &["day","md","dayNumber"])?;
-        if day <= 0 || day > active_through {
-            return None;
-        }
-        Some(PerformanceEntry {
-            day_number: day,
-            points: integer_value(item, &["p","points"]),
-            minutes: integer_value(item, &["mp","minutes"]),
-            status: integer_value(item, &["st","status"]),
-            home_team_id: string_value(item, &["t1","homeTeamId"]),
-            away_team_id: string_value(item, &["t2","awayTeamId"]),
-            home_goals: integer_value(item, &["t1g","homeGoals"]),
-            away_goals: integer_value(item, &["t2g","awayGoals"]),
-            player_team_id: string_value(item, &["pt","playerTeamId"]),
+    let mut out = history
+        .iter()
+        .filter_map(|item| {
+            let day = integer_value(item, &["day", "md", "dayNumber"])?;
+            if day <= 0 || day > active_through {
+                return None;
+            }
+            Some(PerformanceEntry {
+                day_number: day,
+                points: integer_value(item, &["p", "points"]),
+                minutes: integer_value(item, &["mp", "minutes"]),
+                status: integer_value(item, &["st", "status"]),
+                home_team_id: string_value(item, &["t1", "homeTeamId"]),
+                away_team_id: string_value(item, &["t2", "awayTeamId"]),
+                home_goals: integer_value(item, &["t1g", "homeGoals"]),
+                away_goals: integer_value(item, &["t2g", "awayGoals"]),
+                player_team_id: string_value(item, &["pt", "playerTeamId"]),
+            })
         })
-    }).collect::<Vec<_>>();
+        .collect::<Vec<_>>();
 
     // Fallback for payloads without `cur`: do not surface obvious future fixture
     // placeholders after the last matchday with real activity.
     if current_day.is_none() {
-        if let Some(last_active) = out.iter()
+        if let Some(last_active) = out
+            .iter()
             .filter(|entry| entry.minutes.unwrap_or(0) > 0 || entry.points.unwrap_or(0) != 0)
             .map(|entry| entry.day_number)
             .max()
@@ -230,10 +271,14 @@ pub fn parse_performance(value: &Value) -> Vec<PerformanceEntry> {
     out
 }
 
+type SeasonHistoryCandidate<'a> = (&'a Vec<Value>, Option<i64>, bool, Option<i64>, Option<i64>);
+
 fn current_season_context(value: &Value) -> Option<(&Vec<Value>, Option<i64>, Option<i64>)> {
-    let mut candidates: Vec<(&Vec<Value>, Option<i64>, bool, Option<i64>, Option<i64>)> = Vec::new();
+    let mut candidates: Vec<SeasonHistoryCandidate<'_>> = Vec::new();
     collect_season_histories(value, &mut candidates);
-    if candidates.is_empty() { return None; }
+    if candidates.is_empty() {
+        return None;
+    }
 
     candidates.sort_by(|a, b| {
         b.2.cmp(&a.2)
@@ -243,26 +288,30 @@ fn current_season_context(value: &Value) -> Option<(&Vec<Value>, Option<i64>, Op
     Some((history, current_day, matchday_status))
 }
 
-fn collect_season_histories<'a>(
-    value: &'a Value,
-    out: &mut Vec<(&'a Vec<Value>, Option<i64>, bool, Option<i64>, Option<i64>)>,
-) {
+fn collect_season_histories<'a>(value: &'a Value, out: &mut Vec<SeasonHistoryCandidate<'a>>) {
     match value {
         Value::Object(map) => {
             if let Some(history) = map.get("ph").and_then(Value::as_array) {
-                let season = integer_value(value, &["ti","season","seasonId"])
-                    .or_else(|| string_value(value, &["ti","season","seasonId"]).and_then(|s| {
+                let season = integer_value(value, &["ti", "season", "seasonId"]).or_else(|| {
+                    string_value(value, &["ti", "season", "seasonId"]).and_then(|s| {
                         let digits: String = s.chars().filter(|c| c.is_ascii_digit()).collect();
                         digits.parse::<i64>().ok()
-                    }));
-                let current_day = integer_value(value, &["cur","currentMatchday","currentDay"]);
-                let matchday_status = integer_value(value, &["mdst","matchdayStatus"]);
+                    })
+                });
+                let current_day = integer_value(value, &["cur", "currentMatchday", "currentDay"]);
+                let matchday_status = integer_value(value, &["mdst", "matchdayStatus"]);
                 let looks_current = current_day.is_some() || matchday_status.is_some();
                 out.push((history, season, looks_current, current_day, matchday_status));
             }
-            for child in map.values() { collect_season_histories(child, out); }
+            for child in map.values() {
+                collect_season_histories(child, out);
+            }
         }
-        Value::Array(items) => for child in items { collect_season_histories(child, out); },
+        Value::Array(items) => {
+            for child in items {
+                collect_season_histories(child, out);
+            }
+        }
         _ => {}
     }
 }
@@ -298,8 +347,17 @@ pub fn parse_breakdown(
     }
 
     let mut items = grouped.into_values().collect::<Vec<_>>();
-    items.sort_by(|a, b| b.points.abs().cmp(&a.points.abs()).then(a.label.cmp(&b.label)));
-    PerformanceBreakdown { day_number, total_points, items }
+    items.sort_by(|a, b| {
+        b.points
+            .abs()
+            .cmp(&a.points.abs())
+            .then(a.label.cmp(&b.label))
+    });
+    PerformanceBreakdown {
+        day_number,
+        total_points,
+        items,
+    }
 }
 
 fn event_type_labels(value: &Value) -> HashMap<String, String> {
@@ -320,7 +378,10 @@ fn collect_eventtypes(value: &Value, out: &mut HashMap<String, String>) {
             let explicit_label = string_value(value, &["n", "name", "txt", "label", "title"]);
 
             if let Some(label) = explicit_label {
-                if let Some(id) = compact_i.clone().or_else(|| string_value(value, &["id", "typeId"])) {
+                if let Some(id) = compact_i
+                    .clone()
+                    .or_else(|| string_value(value, &["id", "typeId"]))
+                {
                     out.entry(id).or_insert(label.clone());
                 }
                 if let Some(id) = compact_ti.clone().filter(|v| looks_like_id(v)) {
@@ -328,8 +389,12 @@ fn collect_eventtypes(value: &Value, out: &mut HashMap<String, String>) {
                 }
             } else if let (Some(i), Some(ti)) = (compact_i, compact_ti) {
                 match (looks_like_id(&i), looks_like_id(&ti)) {
-                    (true, false) => { out.entry(i).or_insert(ti); }
-                    (false, true) => { out.entry(ti).or_insert(i); }
+                    (true, false) => {
+                        out.entry(i).or_insert(ti);
+                    }
+                    (false, true) => {
+                        out.entry(ti).or_insert(i);
+                    }
                     _ => {}
                 }
             }
@@ -353,7 +418,9 @@ fn collect_scoring_events(
     out: &mut Vec<BreakdownItem>,
     depth: usize,
 ) {
-    if depth > 10 { return; }
+    if depth > 10 {
+        return;
+    }
 
     match value {
         Value::Object(map) => {
@@ -365,15 +432,21 @@ fn collect_scoring_events(
                 .filter(|id| labels.contains_key(id));
 
             if let Some(event_id) = event_id {
-                if let Some(points) = integer_value(value, &["p", "pts", "points", "score", "v", "pt"]) {
+                if let Some(points) =
+                    integer_value(value, &["p", "pts", "points", "score", "v", "pt"])
+                {
                     // A single component can legitimately be sizeable, while a
                     // complete match total must never be parsed as an event.
                     if points.abs() <= 250 {
                         out.push(BreakdownItem {
-                            label: labels.get(&event_id).cloned().unwrap_or_else(|| event_id.clone()),
+                            label: labels
+                                .get(&event_id)
+                                .cloned()
+                                .unwrap_or_else(|| event_id.clone()),
                             id: event_id,
                             points,
-                            count: integer_value(value, &["c", "cnt", "count", "amount", "n"]).or(Some(1)),
+                            count: integer_value(value, &["c", "cnt", "count", "amount", "n"])
+                                .or(Some(1)),
                         });
                     }
                 }
@@ -395,10 +468,47 @@ fn collect_scoring_events(
 fn looks_like_id(value: &str) -> bool {
     !value.is_empty() && value.chars().all(|c| c.is_ascii_digit() || c == '-')
 }
-fn string_value(value:&Value,keys:&[&str])->Option<String>{keys.iter().find_map(|key|value.get(*key).and_then(|v|match v{Value::String(s) if !s.trim().is_empty()=>Some(s.clone()),Value::Number(n)=>Some(n.to_string()),_=>None}))}
-fn integer_value(value:&Value,keys:&[&str])->Option<i64>{keys.iter().find_map(|key|value.get(*key).and_then(|v|match v{Value::Number(n)=>n.as_i64(),Value::String(s)=>s.parse().ok(),_=>None}))}
-fn number_value(value:&Value,keys:&[&str])->Option<f64>{keys.iter().find_map(|key|value.get(*key).and_then(|v|match v{Value::Number(n)=>n.as_f64(),Value::String(s)=>s.parse().ok(),_=>None}))}
-
+fn string_value(value: &Value, keys: &[&str]) -> Option<String> {
+    keys.iter().find_map(|key| {
+        value.get(*key).and_then(|v| match v {
+            Value::String(s) if !s.trim().is_empty() => Some(s.clone()),
+            Value::Number(n) => Some(n.to_string()),
+            _ => None,
+        })
+    })
+}
+fn integer_value(value: &Value, keys: &[&str]) -> Option<i64> {
+    keys.iter().find_map(|key| {
+        value.get(*key).and_then(|v| match v {
+            Value::Number(n) => n.as_i64().or_else(|| integral_f64(n.as_f64()?)),
+            Value::String(s) => s
+                .parse::<i64>()
+                .ok()
+                .or_else(|| s.parse::<f64>().ok().and_then(integral_f64)),
+            _ => None,
+        })
+    })
+}
+fn integral_f64(value: f64) -> Option<i64> {
+    if value.is_finite()
+        && value.fract() == 0.0
+        && value >= i64::MIN as f64
+        && value <= i64::MAX as f64
+    {
+        Some(value as i64)
+    } else {
+        None
+    }
+}
+fn number_value(value: &Value, keys: &[&str]) -> Option<f64> {
+    keys.iter().find_map(|key| {
+        value.get(*key).and_then(|v| match v {
+            Value::Number(n) => n.as_f64(),
+            Value::String(s) => s.parse().ok(),
+            _ => None,
+        })
+    })
+}
 
 #[cfg(test)]
 mod tests {
@@ -421,8 +531,14 @@ mod tests {
         assert_eq!(
             parsed,
             vec![
-                MarketValueHistoryEntry { date: "2026-09-21".to_owned(), value: 16_018_000 },
-                MarketValueHistoryEntry { date: "2026-09-22".to_owned(), value: 15_573_000 },
+                MarketValueHistoryEntry {
+                    date: "2026-09-21".to_owned(),
+                    value: 16_018_000
+                },
+                MarketValueHistoryEntry {
+                    date: "2026-09-22".to_owned(),
+                    value: 15_573_000
+                },
             ]
         );
     }
@@ -437,7 +553,28 @@ mod tests {
 
         assert_eq!(
             parse_market_value_history(&payload),
-            vec![MarketValueHistoryEntry { date: "2026-09-23".to_owned(), value: 15_100_000 }]
+            vec![MarketValueHistoryEntry {
+                date: "2026-09-23".to_owned(),
+                value: 15_100_000
+            }]
+        );
+    }
+
+    #[test]
+    fn accepts_integral_float_market_values_from_the_live_api() {
+        let payload = json!({
+            "it": [
+                { "dt": 20751, "mv": 23_154_618.0 },
+                { "dt": 20750, "mv": 0.0 }
+            ]
+        });
+
+        assert_eq!(
+            parse_market_value_history(&payload),
+            vec![MarketValueHistoryEntry {
+                date: "2026-10-25".to_owned(),
+                value: 23_154_618
+            }]
         );
     }
 }

@@ -55,11 +55,17 @@ pub fn parse_market(value: &Value) -> Result<MarketResponse, CommandError> {
         .get("it")
         .and_then(Value::as_array)
         .or_else(|| value.as_array())
-        .ok_or_else(|| CommandError::invalid_response("Kickbase hat den Markt in einem unbekannten Format geliefert."))?;
+        .ok_or_else(|| {
+            CommandError::invalid_response(
+                "Kickbase hat den Markt in einem unbekannten Format geliefert.",
+            )
+        })?;
 
     let entries = items.iter().filter_map(parse_entry).collect::<Vec<_>>();
     if !items.is_empty() && entries.is_empty() {
-        return Err(CommandError::invalid_response("Kickbase hat Markteinträge geliefert, die nicht gelesen werden konnten."));
+        return Err(CommandError::invalid_response(
+            "Kickbase hat Markteinträge geliefert, die nicht gelesen werden konnten.",
+        ));
     }
 
     Ok(MarketResponse { entries })
@@ -71,7 +77,10 @@ fn parse_entry(value: &Value) -> Option<MarketEntry> {
         .or_else(|| {
             let first = string_value(value, &["fn", "firstName"])?;
             let last = string_value(value, &["ln", "lastName"]);
-            Some(match last { Some(last) => format!("{first} {last}"), None => first })
+            Some(match last {
+                Some(last) => format!("{first} {last}"),
+                None => first,
+            })
         })
         .unwrap_or_else(|| format!("Spieler {player_id}"));
 
@@ -90,7 +99,10 @@ fn parse_entry(value: &Value) -> Option<MarketEntry> {
         market_value,
         market_value_change_24h: integer_value(value, &["tfhmvt", "marketValueChange24h"]),
         price,
-        price_difference: match (price, market_value) { (Some(price), Some(mv)) => Some(price - mv), _ => None },
+        price_difference: match (price, market_value) {
+            (Some(price), Some(mv)) => Some(price - mv),
+            _ => None,
+        },
         points_total: integer_value(value, &["p", "points", "pointsTotal"]),
         average_points: number_value(value, &["ap", "averagePoints"]),
         status: integer_value(value, &["st", "status"]),
@@ -108,27 +120,38 @@ fn parse_entry(value: &Value) -> Option<MarketEntry> {
     })
 }
 
-
 pub fn parse_visible_offers(value: &Value) -> Vec<MarketOffer> {
-    let Some(items) = find_offer_array(value, 0) else { return Vec::new(); };
+    let Some(items) = find_offer_array(value, 0) else {
+        return Vec::new();
+    };
     let mut offers = items.iter().filter_map(parse_offer).collect::<Vec<_>>();
 
     // Compact responses can repeat the same bid in several aliases. Keep one
     // canonical row per bidder/offer + price so UI and budget math never double count.
-    offers.dedup_by(|a, b| a.id == b.id && a.user_id == b.user_id && a.price == b.price && a.is_kickbase == b.is_kickbase);
+    offers.dedup_by(|a, b| {
+        a.id == b.id
+            && a.user_id == b.user_id
+            && a.price == b.price
+            && a.is_kickbase == b.is_kickbase
+    });
     offers
 }
 
 pub fn transfer_offer_count(value: &Value) -> Option<i64> {
-    find_integer_recursive(value, &["ofc", "offerCount"], 0)
-        .or_else(|| {
-            let count = parse_visible_offers(value).len();
-            if count > 0 { Some(count as i64) } else { None }
-        })
+    find_integer_recursive(value, &["ofc", "offerCount"], 0).or_else(|| {
+        let count = parse_visible_offers(value).len();
+        if count > 0 {
+            Some(count as i64)
+        } else {
+            None
+        }
+    })
 }
 
 fn parse_offer(value: &Value) -> Option<MarketOffer> {
-    if !value.is_object() { return None; }
+    if !value.is_object() {
+        return None;
+    }
 
     let (nested_user_id, nested_user_name) = match value.get("u") {
         Some(Value::Object(_)) => (
@@ -150,51 +173,81 @@ fn parse_offer(value: &Value) -> Option<MarketOffer> {
 
     // For manager offers Kickbase commonly expects the bidder/user id in the
     // accept/decline route. Prefer that over opaque row ids when both exist.
-    let id = user_id.clone().or_else(|| string_value(value, &["oi", "offerId", "i", "id"]));
+    let id = user_id
+        .clone()
+        .or_else(|| string_value(value, &["oi", "offerId", "i", "id"]));
     let is_kickbase = user_id.is_none()
-        && user_name.as_deref().map(|name| name.eq_ignore_ascii_case("kickbase")).unwrap_or(true);
+        && user_name
+            .as_deref()
+            .map(|name| name.eq_ignore_ascii_case("kickbase"))
+            .unwrap_or(true);
 
     // Rows without any usable price are not actionable and must not influence
     // the budget planner.
-    if price.is_none() { return None; }
+    price?;
 
-    Some(MarketOffer { id, user_id, user_name, price, is_kickbase })
+    Some(MarketOffer {
+        id,
+        user_id,
+        user_name,
+        price,
+        is_kickbase,
+    })
 }
 
 fn find_offer_array(value: &Value, depth: usize) -> Option<&Vec<Value>> {
-    if depth > 5 { return None; }
+    if depth > 5 {
+        return None;
+    }
     match value {
         Value::Object(map) => {
             for key in ["ofs", "offers"] {
-                if let Some(items) = map.get(key).and_then(Value::as_array) { return Some(items); }
+                if let Some(items) = map.get(key).and_then(Value::as_array) {
+                    return Some(items);
+                }
             }
             for child in map.values() {
-                if let Some(items) = find_offer_array(child, depth + 1) { return Some(items); }
+                if let Some(items) = find_offer_array(child, depth + 1) {
+                    return Some(items);
+                }
             }
             None
         }
-        Value::Array(items) => items.iter().find_map(|child| find_offer_array(child, depth + 1)),
+        Value::Array(items) => items
+            .iter()
+            .find_map(|child| find_offer_array(child, depth + 1)),
         _ => None,
     }
 }
 
 fn find_integer_recursive(value: &Value, keys: &[&str], depth: usize) -> Option<i64> {
-    if depth > 5 { return None; }
-    if let Some(found) = integer_value(value, keys) { return Some(found); }
+    if depth > 5 {
+        return None;
+    }
+    if let Some(found) = integer_value(value, keys) {
+        return Some(found);
+    }
     match value {
-        Value::Object(map) => map.values().find_map(|child| find_integer_recursive(child, keys, depth + 1)),
-        Value::Array(items) => items.iter().find_map(|child| find_integer_recursive(child, keys, depth + 1)),
+        Value::Object(map) => map
+            .values()
+            .find_map(|child| find_integer_recursive(child, keys, depth + 1)),
+        Value::Array(items) => items
+            .iter()
+            .find_map(|child| find_integer_recursive(child, keys, depth + 1)),
         _ => None,
     }
 }
 
-
 fn sanitized_first_name(first_name: Option<String>, display_name: &str) -> Option<String> {
     let first = first_name?.trim().to_string();
-    if first.is_empty() { return None; }
+    if first.is_empty() {
+        return None;
+    }
     let display = display_name.trim();
     if display.eq_ignore_ascii_case(&first)
-        || display.to_lowercase().starts_with(&format!("{} ", first.to_lowercase()))
+        || display
+            .to_lowercase()
+            .starts_with(&format!("{} ", first.to_lowercase()))
     {
         return None;
     }
@@ -202,8 +255,12 @@ fn sanitized_first_name(first_name: Option<String>, display_name: &str) -> Optio
 }
 
 fn parse_seller(value: Option<&Value>) -> (Option<String>, Option<String>, bool) {
-    let Some(value) = value else { return (None, Some("Kickbase".to_string()), true); };
-    if value.is_null() { return (None, Some("Kickbase".to_string()), true); }
+    let Some(value) = value else {
+        return (None, Some("Kickbase".to_string()), true);
+    };
+    if value.is_null() {
+        return (None, Some("Kickbase".to_string()), true);
+    }
 
     match value {
         Value::Object(_) => {
@@ -228,15 +285,18 @@ fn parse_position(value: Option<i64>) -> PlayerPosition {
 }
 
 fn string_value(value: &Value, keys: &[&str]) -> Option<String> {
-    keys.iter().find_map(|key| value.get(*key).and_then(|candidate| match candidate {
-        Value::String(text) if !text.trim().is_empty() => Some(text.to_string()),
-        Value::Number(number) => Some(number.to_string()),
-        _ => None,
-    }))
+    keys.iter().find_map(|key| {
+        value.get(*key).and_then(|candidate| match candidate {
+            Value::String(text) if !text.trim().is_empty() => Some(text.to_string()),
+            Value::Number(number) => Some(number.to_string()),
+            _ => None,
+        })
+    })
 }
 
 fn integer_value(value: &Value, keys: &[&str]) -> Option<i64> {
-    keys.iter().find_map(|key| value.get(*key).and_then(number_as_i64))
+    keys.iter()
+        .find_map(|key| value.get(*key).and_then(number_as_i64))
 }
 
 fn number_as_i64(value: &Value) -> Option<i64> {
@@ -254,28 +314,43 @@ fn number_as_i64(value: &Value) -> Option<i64> {
 }
 
 fn number_value(value: &Value, keys: &[&str]) -> Option<f64> {
-    keys.iter().find_map(|key| value.get(*key).and_then(|candidate| match candidate {
-        Value::Number(number) => number.as_f64(),
-        Value::String(text) => text.parse::<f64>().ok(),
-        _ => None,
-    }))
+    keys.iter().find_map(|key| {
+        value.get(*key).and_then(|candidate| match candidate {
+            Value::Number(number) => number.as_f64(),
+            Value::String(text) => text.parse::<f64>().ok(),
+            _ => None,
+        })
+    })
 }
 
 fn bool_value(value: &Value, keys: &[&str]) -> Option<bool> {
-    keys.iter().find_map(|key| value.get(*key).and_then(|candidate| match candidate {
-        Value::Bool(flag) => Some(*flag),
-        Value::Number(number) => number.as_i64().map(|number| number != 0),
-        Value::String(text) => match text.as_str() { "true" | "1" => Some(true), "false" | "0" => Some(false), _ => None },
-        _ => None,
-    }))
+    keys.iter().find_map(|key| {
+        value.get(*key).and_then(|candidate| match candidate {
+            Value::Bool(flag) => Some(*flag),
+            Value::Number(number) => number.as_i64().map(|number| number != 0),
+            Value::String(text) => match text.as_str() {
+                "true" | "1" => Some(true),
+                "false" | "0" => Some(false),
+                _ => None,
+            },
+            _ => None,
+        })
+    })
 }
 
 fn integer_array(value: &Value, keys: &[&str]) -> Vec<i64> {
-    keys.iter().find_map(|key| value.get(*key).and_then(Value::as_array).map(|items| {
-        items.iter().filter_map(|candidate| match candidate {
-            Value::Number(number) => number.as_i64(),
-            Value::String(text) => text.parse::<i64>().ok(),
-            _ => None,
-        }).collect::<Vec<_>>()
-    })).unwrap_or_default()
+    keys.iter()
+        .find_map(|key| {
+            value.get(*key).and_then(Value::as_array).map(|items| {
+                items
+                    .iter()
+                    .filter_map(|candidate| match candidate {
+                        Value::Number(number) => number.as_i64(),
+                        Value::String(text) => text.parse::<i64>().ok(),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>()
+            })
+        })
+        .unwrap_or_default()
 }

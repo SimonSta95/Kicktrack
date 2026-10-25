@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 
-use crate::kickbase::error::CommandError;
+use crate::kickbase::{error::CommandError, validation::api_id};
 
 const APP_DIR_NAME: &str = "KickTrack";
 const DB_FILE_NAME: &str = "kicktrack.db";
@@ -66,6 +66,16 @@ struct HistoricalSample {
     error: i64,
 }
 
+type QualityRow = (
+    i64,
+    i64,
+    i64,
+    i64,
+    i64,
+    Option<String>,
+    Option<i64>,
+    Option<i64>,
+);
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -79,33 +89,46 @@ pub struct HistoricalModelSummary {
 }
 
 #[tauri::command]
-pub async fn rebuild_historical_models(league_id: String) -> Result<HistoricalModelSummary, CommandError> {
-    if league_id.trim().is_empty() {
-        return Err(CommandError::http(400, "Liga-ID ist erforderlich."));
-    }
+pub async fn rebuild_historical_models(
+    league_id: String,
+) -> Result<HistoricalModelSummary, CommandError> {
+    let league_id = api_id(&league_id, "Liga-ID")?;
     tauri::async_runtime::spawn_blocking(move || rebuild_historical_models_inner(&league_id))
         .await
-        .map_err(|_| CommandError::internal("Das historische Modelltraining konnte nicht abgeschlossen werden."))?
+        .map_err(|_| {
+            CommandError::internal(
+                "Das historische Modelltraining konnte nicht abgeschlossen werden.",
+            )
+        })?
 }
 
 #[tauri::command]
 pub async fn mv_predictions(
     league_id: String,
-    inputs: Vec<PredictionInput>,
+    mut inputs: Vec<PredictionInput>,
 ) -> Result<PredictionBatch, CommandError> {
-    if league_id.trim().is_empty() {
-        return Err(CommandError::http(400, "Liga-ID ist erforderlich."));
-    }
+    let league_id = api_id(&league_id, "Liga-ID")?;
     if inputs.len() > 250 {
-        return Err(CommandError::http(400, "Zu viele Spieler für eine Prognoseabfrage."));
+        return Err(CommandError::http(
+            400,
+            "Zu viele Spieler für eine Prognoseabfrage.",
+        ));
+    }
+    for input in &mut inputs {
+        input.player_id = api_id(&input.player_id, "Spieler-ID")?;
     }
 
     tauri::async_runtime::spawn_blocking(move || build_prediction_batch(&league_id, &inputs))
         .await
-        .map_err(|_| CommandError::internal("Die Marktwertprognose konnte nicht berechnet werden."))?
+        .map_err(|_| {
+            CommandError::internal("Die Marktwertprognose konnte nicht berechnet werden.")
+        })?
 }
 
-fn build_prediction_batch(league_id: &str, inputs: &[PredictionInput]) -> Result<PredictionBatch, CommandError> {
+fn build_prediction_batch(
+    league_id: &str,
+    inputs: &[PredictionInput],
+) -> Result<PredictionBatch, CommandError> {
     let conn = open_database()?;
     ensure_schema(&conn)?;
     evaluate_pending_predictions(&conn, league_id)?;
@@ -154,10 +177,8 @@ fn build_prediction_batch(league_id: &str, inputs: &[PredictionInput]) -> Result
 
         let magnitude = latest_delta.abs().max(1);
         let sample_sign = sign(latest_delta);
-        let bucket: &[HistoricalSample] = by_sign
-            .get(&sample_sign)
-            .map(Vec::as_slice)
-            .unwrap_or(&[]);
+        let bucket: &[HistoricalSample] =
+            by_sign.get(&sample_sign).map(Vec::as_slice).unwrap_or(&[]);
         let mut analogs: Vec<&HistoricalSample> = bucket
             .iter()
             .filter(|sample| {
@@ -196,14 +217,22 @@ fn build_prediction_batch(league_id: &str, inputs: &[PredictionInput]) -> Result
         let high = prediction.saturating_add(radius);
 
         let recent = recent_market_value_deltas(&conn, player_id, 3)?;
-        let same_direction = recent.iter().filter(|delta| sign(**delta) == sample_sign).count();
+        let same_direction = recent
+            .iter()
+            .filter(|delta| sign(**delta) == sample_sign)
+            .count();
         let ratio = radius as f64 / (prediction.abs().max(50_000) as f64);
         let has_live_signal = input.market_value_change_24h.is_some();
-        let confidence = if has_live_signal && history_days >= 4 && analogs.len() >= 50 && same_direction >= 2 && ratio <= 0.85 {
+        let confidence = if has_live_signal
+            && history_days >= 4
+            && analogs.len() >= 50
+            && same_direction >= 2
+            && ratio <= 0.85
+        {
             "HOCH"
-        } else if has_live_signal && analogs.len() >= 20 && ratio <= 1.35 {
-            "MITTEL"
-        } else if history_days >= 4 && analogs.len() >= 12 && ratio <= 1.60 {
+        } else if (has_live_signal && analogs.len() >= 20 && ratio <= 1.35)
+            || (history_days >= 4 && analogs.len() >= 12 && ratio <= 1.60)
+        {
             "MITTEL"
         } else {
             "UNSICHER"
@@ -220,7 +249,8 @@ fn build_prediction_batch(league_id: &str, inputs: &[PredictionInput]) -> Result
             history_days,
             baseline_delta: Some(latest_delta),
             method: if interval_scale > 1.01 {
-                "24h persistence + historical calibration + empirical interval calibration".to_string()
+                "24h persistence + historical calibration + empirical interval calibration"
+                    .to_string()
             } else {
                 "24h persistence + historical calibration".to_string()
             },
@@ -252,7 +282,6 @@ fn build_prediction_batch(league_id: &str, inputs: &[PredictionInput]) -> Result
     })
 }
 
-
 #[derive(Debug, Clone, Copy, Default)]
 struct RunningStats {
     count: usize,
@@ -268,22 +297,34 @@ impl RunningStats {
     }
 
     fn mean_error(&self) -> i64 {
-        if self.count == 0 { 0 } else { (self.sum_error / self.count as i128) as i64 }
+        if self.count == 0 {
+            0
+        } else {
+            (self.sum_error / self.count as i128) as i64
+        }
     }
 
     fn interval_radius(&self) -> i64 {
-        if self.count == 0 { return 75_000; }
+        if self.count == 0 {
+            return 75_000;
+        }
         // A robust, cheap walk-forward interval approximation. The live model
         // still uses empirical percentiles; the historical rebuild must stay O(n).
         (((self.sum_abs_error as f64 / self.count as f64) * 1.35).round() as i64).max(25_000)
     }
 }
 
-fn rebuild_historical_models_inner(league_id: &str) -> Result<HistoricalModelSummary, CommandError> {
+fn rebuild_historical_models_inner(
+    league_id: &str,
+) -> Result<HistoricalModelSummary, CommandError> {
     let mut conn = open_database()?;
     ensure_schema(&conn)?;
     let mut samples = historical_samples(&conn)?;
-    samples.sort_by(|a, b| a.sample_date.cmp(&b.sample_date).then_with(|| a.player_id.cmp(&b.player_id)));
+    samples.sort_by(|a, b| {
+        a.sample_date
+            .cmp(&b.sample_date)
+            .then_with(|| a.player_id.cmp(&b.player_id))
+    });
 
     conn.execute(
         "DELETE FROM vnext_market_value_predictions WHERE run_id IN (SELECT id FROM vnext_prediction_runs WHERE league_id=?1 AND model_version=?2 AND id LIKE 'backfill:%')",
@@ -294,7 +335,9 @@ fn rebuild_historical_models_inner(league_id: &str) -> Result<HistoricalModelSum
         params![league_id, MODEL_VERSION],
     ).map_err(|_| CommandError::internal("Alte historische Backtest-Runs konnten nicht entfernt werden."))?;
 
-    let tx = conn.transaction().map_err(|_| CommandError::internal("Historisches Training konnte nicht gestartet werden."))?;
+    let tx = conn.transaction().map_err(|_| {
+        CommandError::internal("Historisches Training konnte nicht gestartet werden.")
+    })?;
     let mut learned: HashMap<(i8, i32, i32), RunningStats> = HashMap::new();
     let mut by_sign: HashMap<i8, RunningStats> = HashMap::new();
     let mut evaluated = 0usize;
@@ -303,7 +346,9 @@ fn rebuild_historical_models_inner(league_id: &str) -> Result<HistoricalModelSum
     while index < samples.len() {
         let day = samples[index].sample_date.clone();
         let mut end = index + 1;
-        while end < samples.len() && samples[end].sample_date == day { end += 1; }
+        while end < samples.len() && samples[end].sample_date == day {
+            end += 1;
+        }
 
         let run_id = format!("backfill:{}:{}:{}", MODEL_VERSION, league_id, day);
         tx.execute(
@@ -316,20 +361,30 @@ fn rebuild_historical_models_inner(league_id: &str) -> Result<HistoricalModelSum
             let bucket = learned.get(&key).copied().unwrap_or_default();
             let fallback = by_sign.get(&sign(sample.d1)).copied().unwrap_or_default();
             let stats = if bucket.count >= 20 { bucket } else { fallback };
-            if stats.count < 12 { continue; }
+            if stats.count < 12 {
+                continue;
+            }
 
             let magnitude = sample.d1.abs().max(1);
             let raw_bias = stats.mean_error();
             let bias_cap = 25_000_i64.max((magnitude as f64 * 0.20).round() as i64);
-            let predicted_delta = sample.d1.saturating_add(raw_bias.clamp(-bias_cap, bias_cap));
+            let predicted_delta = sample
+                .d1
+                .saturating_add(raw_bias.clamp(-bias_cap, bias_cap));
             let actual_delta = sample.d1.saturating_add(sample.error);
             let radius = stats.interval_radius();
             let low = predicted_delta.saturating_sub(radius);
             let high = predicted_delta.saturating_add(radius);
             let absolute_error = predicted_delta.saturating_sub(actual_delta).abs();
             let signed_error = predicted_delta.saturating_sub(actual_delta);
-            let direction_hit = if sign(predicted_delta) == sign(actual_delta) { 1 } else { 0 };
-            let confidence = if stats.count >= 75 && radius as f64 / predicted_delta.abs().max(50_000) as f64 <= 0.9 {
+            let direction_hit = if sign(predicted_delta) == sign(actual_delta) {
+                1
+            } else {
+                0
+            };
+            let confidence = if stats.count >= 75
+                && radius as f64 / predicted_delta.abs().max(50_000) as f64 <= 0.9
+            {
                 "HOCH"
             } else if stats.count >= 30 {
                 "MITTEL"
@@ -348,13 +403,21 @@ fn rebuild_historical_models_inner(league_id: &str) -> Result<HistoricalModelSum
         // Learn a day only after all predictions for that day were produced.
         // This is the crucial no-future-data boundary of the walk-forward test.
         for sample in &samples[index..end] {
-            learned.entry(analog_key(sample.d1, sample.market_value)).or_default().add(sample.error);
-            by_sign.entry(sign(sample.d1)).or_default().add(sample.error);
+            learned
+                .entry(analog_key(sample.d1, sample.market_value))
+                .or_default()
+                .add(sample.error);
+            by_sign
+                .entry(sign(sample.d1))
+                .or_default()
+                .add(sample.error);
         }
         index = end;
     }
 
-    tx.commit().map_err(|_| CommandError::internal("Historisches Training konnte nicht gespeichert werden."))?;
+    tx.commit().map_err(|_| {
+        CommandError::internal("Historisches Training konnte nicht gespeichert werden.")
+    })?;
     let quality = prediction_quality(&conn, league_id)?;
 
     #[cfg(debug_assertions)]
@@ -377,12 +440,19 @@ fn analog_key(delta: i64, market_value: i64) -> (i8, i32, i32) {
 }
 
 fn open_database() -> Result<Connection, CommandError> {
-    let base = dirs::data_dir().ok_or_else(|| CommandError::internal("Der Windows AppData-Ordner konnte nicht ermittelt werden."))?;
+    let base = dirs::data_dir().ok_or_else(|| {
+        CommandError::internal("Der Windows AppData-Ordner konnte nicht ermittelt werden.")
+    })?;
     let db_path = base.join(APP_DIR_NAME).join(DB_FILE_NAME);
-    let conn = Connection::open(db_path)
-        .map_err(|_| CommandError::internal("Die KickTrack-Datenbank konnte für die Prognose nicht geöffnet werden."))?;
+    let conn = Connection::open(db_path).map_err(|_| {
+        CommandError::internal(
+            "Die KickTrack-Datenbank konnte für die Prognose nicht geöffnet werden.",
+        )
+    })?;
     conn.busy_timeout(std::time::Duration::from_secs(5))
-        .map_err(|_| CommandError::internal("SQLite konnte für die Prognose nicht initialisiert werden."))?;
+        .map_err(|_| {
+            CommandError::internal("SQLite konnte für die Prognose nicht initialisiert werden.")
+        })?;
     Ok(conn)
 }
 
@@ -431,7 +501,9 @@ fn ensure_schema(conn: &Connection) -> Result<(), CommandError> {
          CREATE INDEX IF NOT EXISTS idx_vnext_mv_predictions_eval
          ON vnext_market_value_predictions(league_id, evaluated_at, target_date DESC);",
     )
-    .map_err(|_| CommandError::internal("Das Prediction-Schema konnte nicht vorbereitet werden."))?;
+    .map_err(|_| {
+        CommandError::internal("Das Prediction-Schema konnte nicht vorbereitet werden.")
+    })?;
 
     let migration_exists: Option<i64> = conn
         .query_row(
@@ -440,7 +512,9 @@ fn ensure_schema(conn: &Connection) -> Result<(), CommandError> {
             |row| row.get(0),
         )
         .optional()
-        .map_err(|_| CommandError::internal("Der Prediction-Migrationsstand konnte nicht gelesen werden."))?;
+        .map_err(|_| {
+            CommandError::internal("Der Prediction-Migrationsstand konnte nicht gelesen werden.")
+        })?;
 
     if migration_exists.is_none() {
         let legacy_exists: i64 = conn
@@ -482,7 +556,9 @@ fn ensure_schema(conn: &Connection) -> Result<(), CommandError> {
             "INSERT INTO vnext_schema_migrations(version, applied_at) VALUES(4, datetime('now'))",
             [],
         )
-        .map_err(|_| CommandError::internal("Die Prediction-Migration konnte nicht abgeschlossen werden."))?;
+        .map_err(|_| {
+            CommandError::internal("Die Prediction-Migration konnte nicht abgeschlossen werden.")
+        })?;
     }
     Ok(())
 }
@@ -505,17 +581,22 @@ fn historical_samples(conn: &Connection) -> Result<Vec<HistoricalSample>, Comman
            AND julianday(next_date) - julianday(snapshot_date) = 1
            AND next_date <> newest_day"
     ).map_err(|_| CommandError::internal("Die historische Prediction-Basis konnte nicht vorbereitet werden."))?;
-    let rows = stmt.query_map([], |row| {
-        Ok(HistoricalSample {
-            player_id: row.get(0)?,
-            sample_date: row.get(1)?,
-            market_value: row.get(2)?,
-            d1: row.get(3)?,
-            error: row.get(4)?,
+    let rows = stmt
+        .query_map([], |row| {
+            Ok(HistoricalSample {
+                player_id: row.get(0)?,
+                sample_date: row.get(1)?,
+                market_value: row.get(2)?,
+                d1: row.get(3)?,
+                error: row.get(4)?,
+            })
         })
-    }).map_err(|_| CommandError::internal("Die historische Prediction-Basis konnte nicht gelesen werden."))?;
-    rows.collect::<Result<Vec<_>, _>>()
-        .map_err(|_| CommandError::internal("Die historische Prediction-Basis konnte nicht gelesen werden."))
+        .map_err(|_| {
+            CommandError::internal("Die historische Prediction-Basis konnte nicht gelesen werden.")
+        })?;
+    rows.collect::<Result<Vec<_>, _>>().map_err(|_| {
+        CommandError::internal("Die historische Prediction-Basis konnte nicht gelesen werden.")
+    })
 }
 
 fn history_days(conn: &Connection, player_id: &str) -> Result<usize, CommandError> {
@@ -540,12 +621,21 @@ fn latest_completed_delta(conn: &Connection, player_id: &str) -> Result<Option<i
          ORDER BY snapshot_date DESC LIMIT 1",
         [player_id],
         |row| row.get(0),
-    ).optional().map_err(|_| CommandError::internal("Der letzte abgeschlossene MW-Schritt konnte nicht gelesen werden."))
+    )
+    .optional()
+    .map_err(|_| {
+        CommandError::internal("Der letzte abgeschlossene MW-Schritt konnte nicht gelesen werden.")
+    })
 }
 
-fn recent_market_value_deltas(conn: &Connection, player_id: &str, limit: usize) -> Result<Vec<i64>, CommandError> {
-    let mut stmt = conn.prepare(
-        "WITH daily AS (
+fn recent_market_value_deltas(
+    conn: &Connection,
+    player_id: &str,
+    limit: usize,
+) -> Result<Vec<i64>, CommandError> {
+    let mut stmt = conn
+        .prepare(
+            "WITH daily AS (
            SELECT snapshot_date, value,
                   LAG(snapshot_date) OVER(ORDER BY snapshot_date) AS prev_date,
                   LAG(value) OVER(ORDER BY snapshot_date) AS prev_value
@@ -553,12 +643,19 @@ fn recent_market_value_deltas(conn: &Connection, player_id: &str, limit: usize) 
          )
          SELECT value-prev_value FROM daily
          WHERE prev_value IS NOT NULL AND julianday(snapshot_date)-julianday(prev_date)=1
-         ORDER BY snapshot_date DESC LIMIT ?2"
-    ).map_err(|_| CommandError::internal("Die letzten MW-Schritte konnten nicht vorbereitet werden."))?;
-    let rows = stmt.query_map(params![player_id, limit as i64], |row| row.get::<_, i64>(0))
-        .map_err(|_| CommandError::internal("Die letzten MW-Schritte konnten nicht gelesen werden."))?;
-    rows.collect::<Result<Vec<_>, _>>()
-        .map_err(|_| CommandError::internal("Die letzten MW-Schritte konnten nicht gelesen werden."))
+         ORDER BY snapshot_date DESC LIMIT ?2",
+        )
+        .map_err(|_| {
+            CommandError::internal("Die letzten MW-Schritte konnten nicht vorbereitet werden.")
+        })?;
+    let rows = stmt
+        .query_map(params![player_id, limit as i64], |row| row.get::<_, i64>(0))
+        .map_err(|_| {
+            CommandError::internal("Die letzten MW-Schritte konnten nicht gelesen werden.")
+        })?;
+    rows.collect::<Result<Vec<_>, _>>().map_err(|_| {
+        CommandError::internal("Die letzten MW-Schritte konnten nicht gelesen werden.")
+    })
 }
 
 fn prediction_target_date(conn: &Connection) -> Result<String, CommandError> {
@@ -567,7 +664,12 @@ fn prediction_target_date(conn: &Connection) -> Result<String, CommandError> {
                      THEN date('now','localtime') ELSE date('now','localtime','+1 day') END",
         [],
         |row| row.get(0),
-    ).map_err(|_| CommandError::internal("Das Ziel des nächsten 22-Uhr-Refreshs konnte nicht bestimmt werden."))
+    )
+    .map_err(|_| {
+        CommandError::internal(
+            "Das Ziel des nächsten 22-Uhr-Refreshs konnte nicht bestimmt werden.",
+        )
+    })
 }
 
 fn evaluation_through_date(conn: &Connection) -> Result<String, CommandError> {
@@ -576,10 +678,18 @@ fn evaluation_through_date(conn: &Connection) -> Result<String, CommandError> {
                      THEN date('now','localtime') ELSE date('now','localtime','-1 day') END",
         [],
         |row| row.get(0),
-    ).map_err(|_| CommandError::internal("Der letzte abgeschlossene Refresh konnte nicht bestimmt werden."))
+    )
+    .map_err(|_| {
+        CommandError::internal("Der letzte abgeschlossene Refresh konnte nicht bestimmt werden.")
+    })
 }
 
-fn record_predictions(conn: &Connection, league_id: &str, target_date: &str, outputs: &[PredictionOutput]) -> Result<(), CommandError> {
+fn record_predictions(
+    conn: &Connection,
+    league_id: &str,
+    target_date: &str,
+    outputs: &[PredictionOutput],
+) -> Result<(), CommandError> {
     let run_id = format!("{}:{}:{}", MODEL_VERSION, league_id, target_date);
     conn.execute(
         "INSERT INTO vnext_prediction_runs(id, league_id, model_name, model_version, target_date, created_at, parameters_json)
@@ -609,27 +719,53 @@ fn record_predictions(conn: &Connection, league_id: &str, target_date: &str, out
                method=excluded.method, actual_value=NULL, actual_delta=NULL,
                absolute_error=NULL, signed_error=NULL, direction_hit=NULL, evaluated_at=NULL",
             params![
-                run_id, league_id, output.player_id, target_date,
-                baseline_value, output.baseline_delta, delta, expected,
-                output.low_delta, output.high_delta, output.confidence,
-                output.sample_count as i64, output.history_days as i64, output.method,
+                run_id,
+                league_id,
+                output.player_id,
+                target_date,
+                baseline_value,
+                output.baseline_delta,
+                delta,
+                expected,
+                output.low_delta,
+                output.high_delta,
+                output.confidence,
+                output.sample_count as i64,
+                output.history_days as i64,
+                output.method,
             ],
-        ).map_err(|_| CommandError::internal("Die Marktwertprognose konnte nicht gespeichert werden."))?;
+        )
+        .map_err(|_| {
+            CommandError::internal("Die Marktwertprognose konnte nicht gespeichert werden.")
+        })?;
     }
     Ok(())
 }
 
 fn evaluate_pending_predictions(conn: &Connection, league_id: &str) -> Result<(), CommandError> {
     let through = evaluation_through_date(conn)?;
-    let mut stmt = conn.prepare(
-        "SELECT run_id, player_id, target_date, baseline_value, predicted_delta
+    let mut stmt = conn
+        .prepare(
+            "SELECT run_id, player_id, target_date, baseline_value, predicted_delta
          FROM vnext_market_value_predictions
-         WHERE league_id=?1 AND evaluated_at IS NULL AND target_date<=?2"
-    ).map_err(|_| CommandError::internal("Offene Prognosen konnten nicht vorbereitet werden."))?;
-    let rows = stmt.query_map(params![league_id, through], |row| {
-        Ok((row.get::<_,String>(0)?, row.get::<_,String>(1)?, row.get::<_,String>(2)?, row.get::<_,i64>(3)?, row.get::<_,i64>(4)?))
-    }).map_err(|_| CommandError::internal("Offene Prognosen konnten nicht gelesen werden."))?;
-    let pending = rows.collect::<Result<Vec<_>, _>>()
+         WHERE league_id=?1 AND evaluated_at IS NULL AND target_date<=?2",
+        )
+        .map_err(|_| {
+            CommandError::internal("Offene Prognosen konnten nicht vorbereitet werden.")
+        })?;
+    let rows = stmt
+        .query_map(params![league_id, through], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, i64>(3)?,
+                row.get::<_, i64>(4)?,
+            ))
+        })
+        .map_err(|_| CommandError::internal("Offene Prognosen konnten nicht gelesen werden."))?;
+    let pending = rows
+        .collect::<Result<Vec<_>, _>>()
         .map_err(|_| CommandError::internal("Offene Prognosen konnten nicht gelesen werden."))?;
 
     for (run_id, player_id, target_date, baseline, predicted_delta) in pending {
@@ -638,11 +774,17 @@ fn evaluate_pending_predictions(conn: &Connection, league_id: &str) -> Result<()
             params![player_id, target_date],
             |row| row.get(0),
         ).optional().map_err(|_| CommandError::internal("Der tatsächliche Marktwert konnte nicht gelesen werden."))?;
-        let Some(actual_value) = actual.filter(|value| *value > 0) else { continue; };
+        let Some(actual_value) = actual.filter(|value| *value > 0) else {
+            continue;
+        };
         let actual_delta = actual_value.saturating_sub(baseline);
         let signed_error = predicted_delta.saturating_sub(actual_delta);
         let absolute_error = signed_error.abs();
-        let direction_hit = if sign(predicted_delta) == sign(actual_delta) { 1 } else { 0 };
+        let direction_hit = if sign(predicted_delta) == sign(actual_delta) {
+            1
+        } else {
+            0
+        };
         conn.execute(
             "UPDATE vnext_market_value_predictions SET actual_value=?1,actual_delta=?2,absolute_error=?3,signed_error=?4,direction_hit=?5,evaluated_at=datetime('now') WHERE run_id=?6 AND player_id=?7",
             params![actual_value, actual_delta, absolute_error, signed_error, direction_hit, run_id, player_id],
@@ -651,7 +793,10 @@ fn evaluate_pending_predictions(conn: &Connection, league_id: &str) -> Result<()
     Ok(())
 }
 
-fn prediction_quality(conn: &Connection, league_id: &str) -> Result<PredictionQuality, CommandError> {
+fn prediction_quality(
+    conn: &Connection,
+    league_id: &str,
+) -> Result<PredictionQuality, CommandError> {
     let mut stmt = conn.prepare(
         "SELECT predicted_delta,actual_delta,absolute_error,signed_error,direction_hit,confidence,low_delta,high_delta
          FROM vnext_market_value_predictions p
@@ -659,15 +804,26 @@ fn prediction_quality(conn: &Connection, league_id: &str) -> Result<PredictionQu
          WHERE p.league_id=?1 AND p.evaluated_at IS NOT NULL AND r.model_name=?2 AND r.model_version=?3
          ORDER BY p.target_date DESC"
     ).map_err(|_| CommandError::internal("Die Modellgüte konnte nicht vorbereitet werden."))?;
-    let rows = stmt.query_map(params![league_id, MODEL_NAME, MODEL_VERSION], |row| {
-        Ok((
-            row.get::<_,i64>(0)?, row.get::<_,i64>(1)?, row.get::<_,i64>(2)?, row.get::<_,i64>(3)?,
-            row.get::<_,i64>(4)?, row.get::<_,Option<String>>(5)?, row.get::<_,Option<i64>>(6)?, row.get::<_,Option<i64>>(7)?
-        ))
-    }).map_err(|_| CommandError::internal("Die Modellgüte konnte nicht gelesen werden."))?;
-    let data = rows.collect::<Result<Vec<_>, _>>()
+    let rows = stmt
+        .query_map(params![league_id, MODEL_NAME, MODEL_VERSION], |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, i64>(1)?,
+                row.get::<_, i64>(2)?,
+                row.get::<_, i64>(3)?,
+                row.get::<_, i64>(4)?,
+                row.get::<_, Option<String>>(5)?,
+                row.get::<_, Option<i64>>(6)?,
+                row.get::<_, Option<i64>>(7)?,
+            ))
+        })
         .map_err(|_| CommandError::internal("Die Modellgüte konnte nicht gelesen werden."))?;
-    if data.is_empty() { return Ok(PredictionQuality::default()); }
+    let data = rows
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|_| CommandError::internal("Die Modellgüte konnte nicht gelesen werden."))?;
+    if data.is_empty() {
+        return Ok(PredictionQuality::default());
+    }
 
     let n = data.len();
     let direction_hits = data.iter().filter(|row| row.4 == 1).count();
@@ -676,13 +832,22 @@ fn prediction_quality(conn: &Connection, league_id: &str) -> Result<PredictionQu
     let median_abs_error = median_i64(&mut abs_errors);
     let within_100k = data.iter().filter(|row| row.2 <= 100_000).count();
     let bias = data.iter().map(|row| row.3 as f64).sum::<f64>() / n as f64;
-    let interval_rows: Vec<&(i64,i64,i64,i64,i64,Option<String>,Option<i64>,Option<i64>)> = data.iter().filter(|row| row.6.is_some() && row.7.is_some()).collect();
-    let interval_hits = interval_rows.iter().filter(|row| {
-        let low = row.6.unwrap_or(i64::MIN);
-        let high = row.7.unwrap_or(i64::MAX);
-        row.1 >= low && row.1 <= high
-    }).count();
-    let high_rows: Vec<_> = data.iter().filter(|row| row.5.as_deref() == Some("HOCH")).collect();
+    let interval_rows: Vec<&QualityRow> = data
+        .iter()
+        .filter(|row| row.6.is_some() && row.7.is_some())
+        .collect();
+    let interval_hits = interval_rows
+        .iter()
+        .filter(|row| {
+            let low = row.6.unwrap_or(i64::MIN);
+            let high = row.7.unwrap_or(i64::MAX);
+            row.1 >= low && row.1 <= high
+        })
+        .count();
+    let high_rows: Vec<_> = data
+        .iter()
+        .filter(|row| row.5.as_deref() == Some("HOCH"))
+        .collect();
     let high_hits = high_rows.iter().filter(|row| row.4 == 1).count();
 
     Ok(PredictionQuality {
@@ -692,36 +857,65 @@ fn prediction_quality(conn: &Connection, league_id: &str) -> Result<PredictionQu
         median_abs_error,
         within_100k_rate: Some(within_100k as f64 / n as f64),
         bias: Some(bias),
-        interval_coverage: if interval_rows.is_empty() { None } else { Some(interval_hits as f64 / interval_rows.len() as f64) },
-        high_confidence_hit_rate: if high_rows.is_empty() { None } else { Some(high_hits as f64 / high_rows.len() as f64) },
+        interval_coverage: if interval_rows.is_empty() {
+            None
+        } else {
+            Some(interval_hits as f64 / interval_rows.len() as f64)
+        },
+        high_confidence_hit_rate: if high_rows.is_empty() {
+            None
+        } else {
+            Some(high_hits as f64 / high_rows.len() as f64)
+        },
         high_confidence_count: high_rows.len(),
     })
 }
 
 fn empirical_interval_scale(conn: &Connection, league_id: &str) -> Result<f64, CommandError> {
     let quality = prediction_quality(conn, league_id)?;
-    if quality.evaluated_count < 100 { return Ok(1.0); }
-    let Some(coverage) = quality.interval_coverage else { return Ok(1.0); };
-    if coverage >= 0.78 { return Ok(1.0); }
+    if quality.evaluated_count < 100 {
+        return Ok(1.0);
+    }
+    let Some(coverage) = quality.interval_coverage else {
+        return Ok(1.0);
+    };
+    if coverage >= 0.78 {
+        return Ok(1.0);
+    }
     Ok((0.80 / coverage.max(0.50)).clamp(1.0, 1.40))
 }
 
 fn sign(value: i64) -> i8 {
-    if value > 0 { 1 } else if value < 0 { -1 } else { 0 }
+    if value > 0 {
+        1
+    } else if value < 0 {
+        -1
+    } else {
+        0
+    }
 }
 
 fn median_i64(values: &mut [i64]) -> Option<i64> {
-    if values.is_empty() { return None; }
+    if values.is_empty() {
+        return None;
+    }
     values.sort_unstable();
     let mid = values.len() / 2;
-    if values.len() % 2 == 1 { Some(values[mid]) }
-    else { Some(((values[mid - 1] as i128 + values[mid] as i128) / 2) as i64) }
+    if values.len() % 2 == 1 {
+        Some(values[mid])
+    } else {
+        Some(((values[mid - 1] as i128 + values[mid] as i128) / 2) as i64)
+    }
 }
 
 fn percentile_i64(values: &mut [i64], q: f64) -> i64 {
-    if values.is_empty() { return 0; }
+    if values.is_empty() {
+        return 0;
+    }
     values.sort_unstable();
-    if values.len() == 1 { return values[0]; }
+    if values.len() == 1 {
+        return values[0];
+    }
     let pos = q.clamp(0.0, 1.0) * (values.len() - 1) as f64;
     let lo = pos.floor() as usize;
     let hi = (lo + 1).min(values.len() - 1);

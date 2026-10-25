@@ -6,38 +6,26 @@ use crate::{
         error::CommandError,
         league::{merge_manager_dashboard, parse_league_managers, LeagueOverviewResponse},
         squad::{parse_squad, SquadResponse},
+        validation::api_id,
     },
     portraits::sync_portraits_for_player_ids,
     state::AppState,
 };
-
-fn current_token(state: &State<'_, AppState>) -> Result<String, CommandError> {
-    let session = state
-        .session
-        .lock()
-        .map_err(|_| CommandError::internal("Die lokale Session konnte nicht gelesen werden."))?;
-
-    session
-        .as_ref()
-        .map(|session| session.token.clone())
-        .ok_or_else(CommandError::session_expired)
-}
 
 #[tauri::command]
 pub async fn league_overview(
     league_id: String,
     state: State<'_, AppState>,
 ) -> Result<LeagueOverviewResponse, CommandError> {
-    if league_id.trim().is_empty() {
-        return Err(CommandError::http(400, "Eine Liga-ID ist erforderlich."));
-    }
-
-    let token = current_token(&state)?;
-    let league_id = league_id.trim().to_string();
+    let league_id = api_id(&league_id, "Liga-ID")?;
+    let token = state.active_token().await?;
 
     let managers_payload = state
         .kickbase
-        .get_json(&token, &format!("/v4/leagues/{league_id}/settings/managers"))
+        .get_json(
+            &token,
+            &format!("/v4/leagues/{league_id}/settings/managers"),
+        )
         .await?;
 
     let ranking_payload = match state
@@ -68,10 +56,11 @@ pub async fn league_overview(
     // values. Resolve each manager dashboard before touching the DB so stored
     // snapshots are fallback-only, never the source of apparently "fresh" data.
     for manager in &mut live {
-        let path = format!(
-            "/v4/leagues/{league_id}/managers/{}/dashboard",
-            manager.id
-        );
+        let manager_id = match api_id(&manager.id, "Manager-ID") {
+            Ok(manager_id) => manager_id,
+            Err(_) => continue,
+        };
+        let path = format!("/v4/leagues/{league_id}/managers/{manager_id}/dashboard");
 
         match state.kickbase.get_json(&token, &path).await {
             Ok(payload) => {
@@ -87,7 +76,8 @@ pub async fn league_overview(
                 #[cfg(debug_assertions)]
                 crate::kt_debug!(
                     "[KickTrack][DEBUG][league:dashboard] manager={} failed={:?}",
-                    manager.id, error
+                    manager.id,
+                    error
                 );
             }
         }
@@ -139,20 +129,15 @@ pub async fn league_overview(
     Ok(LeagueOverviewResponse { managers: live })
 }
 
-
 #[tauri::command]
 pub async fn manager_squad(
     league_id: String,
     manager_id: String,
     state: State<'_, AppState>,
 ) -> Result<SquadResponse, CommandError> {
-    if league_id.trim().is_empty() || manager_id.trim().is_empty() {
-        return Err(CommandError::http(400, "Liga-ID und Manager-ID sind erforderlich."));
-    }
-
-    let token = current_token(&state)?;
-    let league_id = league_id.trim();
-    let manager_id = manager_id.trim();
+    let league_id = api_id(&league_id, "Liga-ID")?;
+    let manager_id = api_id(&manager_id, "Manager-ID")?;
+    let token = state.active_token().await?;
     let payload = state
         .kickbase
         .get_json(
@@ -166,13 +151,22 @@ pub async fn manager_squad(
     // Manager squads can be the first place where a newly transferred player
     // appears. Persist these live references as well, then resolve only missing
     // portraits so the league view is not tied to the historical DB snapshot.
-    let portrait_ids = squad.players.iter().map(|player| player.id.clone()).collect::<Vec<_>>();
+    let portrait_ids = squad
+        .players
+        .iter()
+        .map(|player| player.id.clone())
+        .collect::<Vec<_>>();
     {
         let db = KickTrackDatabase::open_default()?;
         for player in &squad.players {
             let full_name = player.first_name.as_deref().map(|first| {
                 let first = first.trim();
-                if first.is_empty() || player.name.to_lowercase().starts_with(&format!("{} ", first.to_lowercase())) {
+                if first.is_empty()
+                    || player
+                        .name
+                        .to_lowercase()
+                        .starts_with(&format!("{} ", first.to_lowercase()))
+                {
                     player.name.clone()
                 } else {
                     format!("{first} {}", player.name)
@@ -195,8 +189,9 @@ pub async fn manager_squad(
         }
     }
 
-    match sync_portraits_for_player_ids(league_id, &portrait_ids, &state).await {
-        Ok(summary) => {
+    match sync_portraits_for_player_ids(&league_id, &portrait_ids, &state).await {
+        Ok(summary) =>
+        {
             #[cfg(debug_assertions)]
             if summary.requested > 0 {
                 crate::kt_debug!(
@@ -209,7 +204,8 @@ pub async fn manager_squad(
             #[cfg(debug_assertions)]
             crate::kt_debug!(
                 "[KickTrack][DEBUG][portrait:auto] source=manager-squad manager={} failed={:?}",
-                manager_id, error
+                manager_id,
+                error
             );
         }
     }

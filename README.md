@@ -15,8 +15,12 @@ Die Grafik zeigt den vereinfachten Datenfluss von der Kickbase API über das Tau
 - Transfermarkt mit Geboten, Verkäufen, Restzeit, Marktwert-/Punktesignalen und Budgetplaner.
 - Kader- und Ligaansichten inklusive nächstem Spieltag und Managerdetails.
 - Player Detail mit Marktwertverlauf, Punktehistorie, Fair Value, Restprogramm und Punkte-Aufschlüsselung.
+- Markt- und Kadertabellen mit direkt sichtbarem MW-Verlauf und aktueller Spieltagsform.
 - Lokale SQLite-Persistenz für historische Daten, Transfers, Portraits und Analytics.
 - Gebote werden doppelt geprüft: lokaler Frontend-Preflight für Feedback und autoritativer Rust-Preflight direkt vor dem Kickbase-Write.
+- Optionaler Dauerlogin: Nach ausdrücklicher Aktivierung liegen Zugangsdaten ausschließlich im Windows Credential Manager; KickTrack erneuert ablaufende Kickbase-Tokens vor der nächsten Anfrage.
+
+Beim normalen Login wird kein Passwort gespeichert. „Dauerhaft angemeldet bleiben“ ist standardmäßig deaktiviert und kann jederzeit durch Abmelden widerrufen werden. Weil Kickbase keine dokumentierte Refresh-Token-Schnittstelle bereitstellt, erfolgt die Erneuerung über eine neue Anmeldung mit den geschützten Zugangsdaten. Schreibende Requests werden dabei nie automatisch wiederholt.
 
 ## Entwicklungssetup
 
@@ -31,7 +35,10 @@ Relevante Checks:
 
 ```bash
 npm test
+npm run typecheck
 npm run build
+cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
+cargo test --manifest-path src-tauri/Cargo.toml
 ```
 
 `npm test` verwendet den eingebauten Node-Test-Runner und benötigt keine zusätzliche Test-Library.
@@ -45,12 +52,19 @@ npm run build
 - `src-tauri/src/kickbase/*`: Kickbase-HTTP-/Parsing-Schicht.
 - `src-tauri/src/db/*`: SQLite-Schema, Migrationen und Persistenz.
 
+Beim Start werden versionierte, idempotente Migrationen ausgeführt. Sie legen auch auf einer vollständig neuen Installation alle Tabellen für Marktwert-Historie und Dashboard-Snapshots an; bestehende AppData-Daten werden nicht zurückgesetzt.
+
 Kickbase-spezifische Defaultregeln wie Kaderlimit und Kreditquote sind pro Runtime zentral definiert. API-Werte haben Vorrang; Defaults greifen nur, wenn Kickbase keinen Wert liefert.
 
 ## Changelog
 
 ### 0.8.31
 
+- Dauerlogin mit proaktiver Token-Erneuerung über den Windows Credential Manager; sichere Opt-in-Voreinstellung und vollständiges Entfernen beim Logout.
+- Markt-Formdaten werden gebündelt und begrenzt parallel geladen statt mit einer Anfrage pro Tabellenzeile.
+- Fehlende Tabellen für frische SQLite-Installationen ergänzt und tägliche Kickbase-Historien ohne vorheriges Löschen gespeichert.
+- Einheitliche `Europe/Berlin`-Semantik für Datumsgrenzen, validierte API-IDs, restriktive CSP und reduzierte Tauri-Berechtigungen.
+- Lazy Loading für große Seiten, doppelte Provider entfernt sowie Typecheck-, Test-, Build- und CI-Kommandos ergänzt.
 - Player Detail lädt die Marktwert-Historie primär über Kickbases 365-Tage-Endpunkt und schneidet die bestehenden 7T/30T/90T/1J-Ansichten weiterhin lokal.
 - Lokale SQLite-Historie bleibt als Fallback erhalten und wird mit der Kickbase-Historie nach Datum zusammengeführt; Kickbase gewinnt bei überlappenden Tagen.
 - Lücken in älteren lokalen Marktwert-Snapshots führen dadurch nicht mehr zu leeren kurzen Zeiträumen; ältere lokale Daten außerhalb des 365-Tage-Fensters bleiben für „Gesamt“ erhalten.

@@ -1,19 +1,20 @@
-import { useEffect, useState, type ReactNode } from "react";
+import { lazy, Suspense, useEffect, useState, type ReactNode } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { BarChart3, ChevronDown, LogOut, ShoppingBag, Trophy, UsersRound } from "lucide-react";
 import { useLocation, useNavigate } from "react-router-dom";
 import { BrandLogo } from "@/components/branding/BrandLogo";
 import { Button } from "@/components/ui/button";
 import { getAccountBootstrap, getLeagueAccountContext } from "@/features/account/api";
-import { AccountOverviewPage } from "@/features/account/AccountOverviewPage";
 import { logout } from "@/features/auth/api";
 import { getLeagueSquad } from "@/features/squad/api";
 import { getLeagueOverview } from "@/features/league/api";
-import { LeaguePage } from "@/features/league/LeaguePage";
-import { SquadPage } from "@/features/squad/SquadPage";
 import { getLeagueMarket } from "@/features/market/api";
-import { MarketPage } from "@/features/market/MarketPage";
 import "./app-shell.css";
+
+const AccountOverviewPage = lazy(() => import("@/features/account/AccountOverviewPage").then((module) => ({ default: module.AccountOverviewPage })));
+const LeaguePage = lazy(() => import("@/features/league/LeaguePage").then((module) => ({ default: module.LeaguePage })));
+const SquadPage = lazy(() => import("@/features/squad/SquadPage").then((module) => ({ default: module.SquadPage })));
+const MarketPage = lazy(() => import("@/features/market/MarketPage").then((module) => ({ default: module.MarketPage })));
 
 const ACTIVE_LEAGUE_KEY = "kicktrack.activeLeagueId";
 
@@ -179,6 +180,7 @@ export function AppShell() {
         </header>
 
         <main className="app-content">
+          <Suspense fallback={<ContentLoading />}>
           {section === "overview" ? (
             leagueQuery.isLoading || !leagueQuery.data ? (
               leagueQuery.isError ? (
@@ -224,6 +226,7 @@ export function AppShell() {
               leagueId={selectedLeagueId!}
             />
           )}
+          </Suspense>
         </main>
       </div>
     </div>

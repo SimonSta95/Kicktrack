@@ -1,9 +1,10 @@
 import { useEffect, useMemo, useState, type Dispatch, type PointerEvent as ReactPointerEvent, type SetStateAction } from "react";
-import { useQuery } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { ArrowLeft, CalendarRange, ChevronRight, MapPin, X } from "lucide-react";
 import { getBundledTeamLogo } from "../../lib/team-assets";
 import { PlayerStatusDetails } from "../../components/player-status/PlayerStatus";
 import { getPlayerDetail, getPlayerPerformanceBreakdown } from "./api";
+import { dateOnlyToUtcMs, isDateOlderThan, recentDateCutoffMs } from "@/lib/date-only";
 import type { MarketValuePoint, PerformanceBreakdown, PlayerDetailRequest, PlayerDetailResponse, PlayerPerformanceEntry } from "./types";
 import { analyzeMarketDynamics, analyzePoints } from "../analytics/player-analytics";
 import { MarketDynamicsIndicator } from "../../components/market-dynamics/MarketDynamicsIndicator";
@@ -24,12 +25,20 @@ const RANGE_PRESETS = [
 ] as const;
 
 export function PlayerDetailDrawer({ request, onClose }: { request: PlayerDetailRequest | null; onClose: () => void }) {
+  const queryClient = useQueryClient();
   const detailQuery = useQuery({
     queryKey: ["player-detail", request?.leagueId, request?.playerId],
     queryFn: () => getPlayerDetail(request!.leagueId, request!.playerId),
     enabled: Boolean(request),
+    staleTime: 0,
+    refetchOnMount: "always",
   });
   const [selectedDay, setSelectedDay] = useState<number | null>(null);
+  useEffect(() => {
+    if (detailQuery.data && request?.playerId) {
+      void queryClient.invalidateQueries({ queryKey: ["analytics", "market-value-histories"] });
+    }
+  }, [detailQuery.dataUpdatedAt, request?.playerId, queryClient]);
 
   useEffect(() => {
     setSelectedDay(null);
@@ -257,7 +266,7 @@ function MarketValueSection({ points }: { points: MarketValuePoint[] }) {
   useEffect(() => {
     setStart(0);
     setEnd(Math.max(presetPoints.length - 1, 0));
-  }, [presetPoints.length, preset]);
+  }, [presetPoints, preset]);
 
   const visible = presetPoints.slice(Math.min(start, end), Math.max(start, end) + 1);
   const delta = visible.length > 1 ? visible[visible.length - 1].value - visible[0].value : 0;
@@ -270,6 +279,7 @@ function MarketValueSection({ points }: { points: MarketValuePoint[] }) {
           {RANGE_PRESETS.map((item) => <button type="button" key={item.label} className={preset === item.label ? "is-active" : ""} onClick={() => setPreset(item.label)}>{item.label}</button>)}
         </div>
       </div>
+      <div className="mv-history-freshness">{points.length ? `Letzter gespeicherter MW: ${formatDate(points[points.length - 1].date)}${isDateOlderThan(points[points.length - 1].date, 2) ? " · Historie möglicherweise veraltet" : ""}` : "Keine Marktwerthistorie verfügbar"}</div>
       {visible.length > 1 ? <MarketValueChart points={visible} /> : <div className="player-section__empty">Für diesen Zeitraum liegen noch nicht genug Marktwerte vor.</div>}
       {presetPoints.length > 2 ? (
         <div className="chart-range-control">
@@ -292,12 +302,12 @@ function MarketValueChart({ points }: { points: MarketValuePoint[] }) {
   const values = points.map((p) => p.value);
   const min = Math.min(...values), max = Math.max(...values);
   const span = Math.max(max - min, 1);
-  const coords = points.map((point, i) => ({
+  const coords = points.map((point) => ({
     ...point,
-    x: padX + (i / Math.max(points.length - 1, 1)) * (width - padX * 2),
+    x: padX + ((dateOnlyToUtcMs(point.date) - dateOnlyToUtcMs(points[0].date)) / Math.max(dateOnlyToUtcMs(points[points.length - 1].date) - dateOnlyToUtcMs(points[0].date), 1)) * (width - padX * 2),
     y: padY + (1 - (point.value - min) / span) * (height - padY * 2),
   }));
-  const path = coords.map((p, i) => `${i ? "L" : "M"}${p.x.toFixed(1)},${p.y.toFixed(1)}`).join(" ");
+  const path = coords.map((point, index) => `${index ? "L" : "M"}${point.x.toFixed(1)},${point.y.toFixed(1)}`).join(" ");
   const area = `${path} L${coords[coords.length - 1].x},${height - padY} L${coords[0].x},${height - padY} Z`;
   const hovered = hoveredIndex == null ? null : coords[hoveredIndex];
 
@@ -306,8 +316,7 @@ function MarketValueChart({ points }: { points: MarketValuePoint[] }) {
     if (!rect.width || !coords.length) return;
     const localX = Math.max(0, Math.min(rect.width, event.clientX - rect.left));
     const chartX = (localX / rect.width) * width;
-    const relative = (chartX - padX) / Math.max(width - padX * 2, 1);
-    const index = Math.round(Math.max(0, Math.min(1, relative)) * Math.max(coords.length - 1, 0));
+    const index = coords.reduce((best, point, i) => Math.abs(point.x - chartX) < Math.abs(coords[best].x - chartX) ? i : best, 0);
     setHoveredIndex(index);
   }
 
@@ -421,7 +430,7 @@ function DrawerState({ error, retry, onClose }: { error: boolean; retry: () => v
 }
 type MetricTone = "positive" | "negative" | "neutral";
 function Metric({ label, value, subvalue, tone: metricTone = "neutral" }: { label: string; value: string; subvalue?: string; tone?: MetricTone }) { return <div><span>{label}</span><strong className={`tone-${metricTone}`}>{value}</strong>{subvalue ? <small className="player-detail__metric-sub">{subvalue}</small> : null}</div>; }
-function filterPreset(points: MarketValuePoint[], label: string) { const preset = RANGE_PRESETS.find((p) => p.label === label); if (!preset?.days || !points.length) return points; const last = new Date(`${points[points.length - 1].date}T00:00:00Z`).getTime(); const cutoff = last - (preset.days - 1) * 86400000; return points.filter((point) => new Date(`${point.date}T00:00:00Z`).getTime() >= cutoff); }
+function filterPreset(points: MarketValuePoint[], label: string) { const preset = RANGE_PRESETS.find((p) => p.label === label); if (!preset?.days || !points.length) return points; const cutoff = recentDateCutoffMs(preset.days); return points.filter((point) => dateOnlyToUtcMs(point.date) >= cutoff); }
 function tone(value: number) { return value > 0 ? "positive" : value < 0 ? "negative" : "neutral"; }
 function formatCurrency(value: number) { return new Intl.NumberFormat("de-DE", { style: "currency", currency: "EUR", maximumFractionDigits: 0 }).format(value); }
 function formatSignedCurrency(value: number) { const sign = value > 0 ? "+" : ""; const abs = Math.abs(value); if (abs >= 1_000_000) return `${sign}${(value / 1_000_000).toLocaleString("de-DE", { maximumFractionDigits: 2 })} Mio. €`; if (abs >= 1_000) return `${sign}${Math.round(value / 1_000).toLocaleString("de-DE")} Tsd. €`; return `${sign}${value.toLocaleString("de-DE")} €`; }

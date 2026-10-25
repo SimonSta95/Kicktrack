@@ -8,13 +8,14 @@
     "build": "tsc && vite build",
     "preview": "vite preview",
     "tauri": "tauri",
-    "test": "node --experimental-strip-types --test test/bid-eligibility.test.mjs"
+    "test": "node --experimental-strip-types --test test/bid-eligibility.test.mjs test/date-only.test.mjs test/market-sparkline.test.mjs",
+    "typecheck": "tsc --noEmit",
+    "check": "npm test && npm run typecheck && npm run build"
   },
   "dependencies": {
     "react": "^19.1.0",
     "react-dom": "^19.1.0",
     "@tauri-apps/api": "^2",
-    "@tauri-apps/plugin-opener": "^2",
     "@tanstack/react-query": "^5.85.5",
     "clsx": "^2.1.1",
     "lucide-react": "^0.468.0",

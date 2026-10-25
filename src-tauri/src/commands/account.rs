@@ -7,27 +7,16 @@ use crate::{
             LeagueAccountContext,
         },
         error::CommandError,
+        validation::api_id,
     },
     state::AppState,
 };
-
-fn current_token(state: &State<'_, AppState>) -> Result<String, CommandError> {
-    let session = state
-        .session
-        .lock()
-        .map_err(|_| CommandError::internal("Die lokale Session konnte nicht gelesen werden."))?;
-
-    session
-        .as_ref()
-        .map(|session| session.token.clone())
-        .ok_or_else(CommandError::session_expired)
-}
 
 #[tauri::command]
 pub async fn account_bootstrap(
     state: State<'_, AppState>,
 ) -> Result<AccountBootstrap, CommandError> {
-    let token = current_token(&state)?;
+    let token = state.active_token().await?;
 
     let settings = state.kickbase.get_json(&token, "/v4/user/settings").await?;
     let selection = state
@@ -46,12 +35,8 @@ pub async fn league_account_context(
     league_id: String,
     state: State<'_, AppState>,
 ) -> Result<LeagueAccountContext, CommandError> {
-    if league_id.trim().is_empty() {
-        return Err(CommandError::http(400, "Eine Liga-ID ist erforderlich."));
-    }
-
-    let token = current_token(&state)?;
-    let league_id = league_id.trim().to_string();
+    let league_id = api_id(&league_id, "Liga-ID")?;
+    let token = state.active_token().await?;
 
     let me = state
         .kickbase
