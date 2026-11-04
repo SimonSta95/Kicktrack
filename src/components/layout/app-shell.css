@@ -95,6 +95,17 @@
 .account-mini__text strong { font-size: 12px; }
 .account-mini__text span { font-size: 10px; color: var(--kb-grey); }
 .app-sidebar__logout { width: 100%; justify-content: flex-start; margin-top: 8px; }
+.app-sidebar__version {
+  display: block;
+  margin-top: 8px;
+  padding: 0 10px;
+  color: var(--kb-grey);
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-align: center;
+  text-transform: uppercase;
+}
 
 .app-workspace {
   min-width: 0;
@@ -329,7 +340,9 @@
    :has is supported by the Tauri WebView2 runtime and keeps this behavior route-specific. */
 .app-content:has(.squad-page),
 .app-content:has(.league-page),
-.app-content:has(.market-page) {
+.app-content:has(.market-page),
+.app-content:has(.fair-value-page),
+.app-content:has(.player-detail--page) {
   height: calc(100dvh - 72px);
   min-height: 0;
   overflow: hidden;
@@ -339,7 +352,9 @@
 @media (max-width: 1180px) {
   .app-content:has(.squad-page),
 .app-content:has(.league-page),
-.app-content:has(.market-page) {
+.app-content:has(.market-page),
+.app-content:has(.fair-value-page),
+.app-content:has(.player-detail--page) {
     padding-left: 22px;
     padding-right: 22px;
   }
@@ -348,7 +363,9 @@
 @media (max-height: 780px) {
   .app-content:has(.squad-page),
 .app-content:has(.league-page),
-.app-content:has(.market-page) {
+.app-content:has(.market-page),
+.app-content:has(.fair-value-page),
+.app-content:has(.player-detail--page) {
     padding-top: 14px;
     padding-bottom: 12px;
   }

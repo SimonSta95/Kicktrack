@@ -1,11 +1,12 @@
 import { useEffect, useMemo, useState, type Dispatch, type PointerEvent as ReactPointerEvent, type SetStateAction } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { ArrowLeft, CalendarRange, ChevronRight, MapPin, X } from "lucide-react";
+import { ArrowLeft, CalendarRange, ChevronRight, MapPin } from "lucide-react";
 import { getBundledTeamLogo } from "../../lib/team-assets";
 import { PlayerStatusDetails } from "../../components/player-status/PlayerStatus";
 import { getPlayerDetail, getPlayerPerformanceBreakdown } from "./api";
 import { dateOnlyToUtcMs, isDateOlderThan, recentDateCutoffMs } from "@/lib/date-only";
-import type { MarketValuePoint, PerformanceBreakdown, PlayerDetailRequest, PlayerDetailResponse, PlayerPerformanceEntry } from "./types";
+import type { MarketValuePoint, PerformanceBreakdown, PlayerDetailRequest, PlayerDetailResponse, PlayerPerformanceEntry, PlayerTransfer } from "./types";
+import { analyzeMarketValues, type MarketValueAnalysis, type MarketValueChange } from "./market-value-analysis";
 import { analyzeMarketDynamics, analyzePoints } from "../analytics/player-analytics";
 import { MarketDynamicsIndicator } from "../../components/market-dynamics/MarketDynamicsIndicator";
 import { useMvPredictions } from "../analytics/use-mv-predictions";
@@ -24,12 +25,11 @@ const RANGE_PRESETS = [
   { label: "Gesamt", days: null },
 ] as const;
 
-export function PlayerDetailDrawer({ request, onClose }: { request: PlayerDetailRequest | null; onClose: () => void }) {
+export function PlayerDetailPage({ request, onClose }: { request: PlayerDetailRequest; onClose: () => void }) {
   const queryClient = useQueryClient();
   const detailQuery = useQuery({
     queryKey: ["player-detail", request?.leagueId, request?.playerId],
     queryFn: () => getPlayerDetail(request!.leagueId, request!.playerId),
-    enabled: Boolean(request),
     staleTime: 0,
     refetchOnMount: "always",
   });
@@ -45,7 +45,6 @@ export function PlayerDetailDrawer({ request, onClose }: { request: PlayerDetail
   }, [request?.playerId]);
 
   useEffect(() => {
-    if (!request) return;
     const key = (event: KeyboardEvent) => {
       if (event.key === "Escape") onClose();
     };
@@ -59,28 +58,24 @@ export function PlayerDetailDrawer({ request, onClose }: { request: PlayerDetail
     enabled: Boolean(request && selectedDay != null),
   });
 
-  if (!request) return null;
-
   return (
-    <div className="player-detail-layer" role="presentation" onMouseDown={onClose}>
-      <aside className="player-detail" role="dialog" aria-modal="true" aria-label="Spielerdetails" onMouseDown={(e) => e.stopPropagation()}>
-        {detailQuery.isLoading || !detailQuery.data ? (
-          <DrawerState error={detailQuery.isError} retry={() => detailQuery.refetch()} onClose={onClose} />
-        ) : (
-          <PlayerDetailContent
-            data={detailQuery.data}
-            leagueId={request.leagueId}
-            contextLabel={request.context?.label}
-            selectedDay={selectedDay}
-            setSelectedDay={setSelectedDay}
-            breakdown={breakdownQuery.data}
-            breakdownLoading={breakdownQuery.isLoading}
-            breakdownError={breakdownQuery.isError}
-            onClose={onClose}
-          />
-        )}
-      </aside>
-    </div>
+    <section className="player-detail player-detail--page" aria-label="Spielerdetails">
+      {detailQuery.isLoading || !detailQuery.data ? (
+        <DrawerState error={detailQuery.isError} retry={() => detailQuery.refetch()} onClose={onClose} />
+      ) : (
+        <PlayerDetailContent
+          data={detailQuery.data}
+          leagueId={request.leagueId}
+          contextLabel={request.context?.label}
+          selectedDay={selectedDay}
+          setSelectedDay={setSelectedDay}
+          breakdown={breakdownQuery.data}
+          breakdownLoading={breakdownQuery.isLoading}
+          breakdownError={breakdownQuery.isError}
+          onClose={onClose}
+        />
+      )}
+    </section>
   );
 }
 
@@ -124,7 +119,7 @@ function PlayerDetailContent({ data, leagueId, contextLabel, selectedDay, setSel
             <PlayerStatusDetails status={player.status} statusList={player.statusList} statusText={player.statusText} compact={false} />
           </div>
         </div>
-        <button type="button" className="player-detail__close" onClick={onClose} aria-label="Schließen"><X size={19} /></button>
+        <button type="button" className="player-detail__back" onClick={onClose} aria-label="Zurück"><ArrowLeft size={17} /> Zurück</button>
       </header>
 
       <div className="player-detail__metrics">
@@ -146,6 +141,7 @@ function PlayerDetailContent({ data, leagueId, contextLabel, selectedDay, setSel
         <FixtureOutlookSection items={outlook} position={player.position} quality={fixtureOutlookQuery.data?.dataQuality ?? null} completedMatches={fixtureOutlookQuery.data?.completedMatches ?? 0} loading={fixtureOutlookQuery.isLoading} />
         <AnalyticsOverview leagueId={leagueId} playerId={player.id} marketValues={data.marketValues} performance={data.performance} marketValue={player.marketValue} currentDelta={player.marketValueChange24h} />
         <MarketValueSection points={data.marketValues} />
+        <TransfersSection transfers={data.transfers} available={data.transfersAvailable} marketValues={data.marketValues} />
         <PerformanceSection entries={data.performance} selectedDay={selectedDay} onSelect={setSelectedDay} />
         <PointsAnalysisSection entries={data.performance} />
         {selectedDay != null ? (
@@ -269,18 +265,35 @@ function MarketValueSection({ points }: { points: MarketValuePoint[] }) {
   }, [presetPoints, preset]);
 
   const visible = presetPoints.slice(Math.min(start, end), Math.max(start, end) + 1);
-  const delta = visible.length > 1 ? visible[visible.length - 1].value - visible[0].value : 0;
+  const analysis = useMemo(() => analyzeMarketValues(visible), [visible]);
+  const delta = analysis?.totalChange ?? 0;
 
   return (
-    <section className="player-section">
+    <section className="player-section player-market-history">
       <div className="player-section__heading">
-        <div><span>Marktwertverlauf</span><strong className={`tone-${tone(delta)}`}>{visible.length > 1 ? formatSignedCurrency(delta) : "—"}</strong></div>
+        <div>
+          <span>Marktwertverlauf</span>
+          <strong className={`tone-${tone(delta)}`}>
+            {analysis && analysis.changes.length ? `${formatSignedCurrency(delta)} · ${formatSignedPercent(analysis.totalChangePct)}` : "—"}
+          </strong>
+        </div>
         <div className="chart-presets">
           {RANGE_PRESETS.map((item) => <button type="button" key={item.label} className={preset === item.label ? "is-active" : ""} onClick={() => setPreset(item.label)}>{item.label}</button>)}
         </div>
       </div>
       <div className="mv-history-freshness">{points.length ? `Letzter gespeicherter MW: ${formatDate(points[points.length - 1].date)}${isDateOlderThan(points[points.length - 1].date, 2) ? " · Historie möglicherweise veraltet" : ""}` : "Keine Marktwerthistorie verfügbar"}</div>
-      {visible.length > 1 ? <MarketValueChart points={visible} /> : <div className="player-section__empty">Für diesen Zeitraum liegen noch nicht genug Marktwerte vor.</div>}
+      {analysis && analysis.changes.length ? (
+        <>
+          <div className="mv-analysis-layout">
+            <div className="mv-analysis-main">
+              <MarketValueChart points={analysis.points} />
+              <DailyChangeBars changes={analysis.changes} />
+            </div>
+            <MarketValueStatistics analysis={analysis} />
+          </div>
+          <RecentMarketValues changes={analysis.changes} />
+        </>
+      ) : <div className="player-section__empty">Für diesen Zeitraum liegen noch nicht genug Marktwerte vor.</div>}
       {presetPoints.length > 2 ? (
         <div className="chart-range-control">
           <CalendarRange size={14} />
@@ -293,6 +306,71 @@ function MarketValueSection({ points }: { points: MarketValuePoint[] }) {
         </div>
       ) : null}
     </section>
+  );
+}
+
+function DailyChangeBars({ changes }: { changes: MarketValueChange[] }) {
+  const visible = changes.slice(-120);
+  const max = Math.max(...visible.map((change) => Math.abs(change.change)), 1);
+  return (
+    <div className="mv-daily-changes">
+      <span className="mv-daily-changes__label">Änderung zur vorherigen Messung</span>
+      <div className="mv-daily-changes__bars" role="img" aria-label="Tägliche Marktwertänderungen">
+        {visible.map((change) => {
+          const height = Math.max(3, Math.abs(change.change) / max * 48);
+          return (
+            <span className="mv-daily-change" key={change.date} title={`${formatDate(change.date)}: ${formatSignedCurrency(change.change)} (${formatSignedPercent(change.changePct)})`}>
+              {change.change > 0 ? <i className="is-positive" style={{ height }} /> : null}
+              <b />
+              {change.change < 0 ? <i className="is-negative" style={{ height }} /> : null}
+            </span>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+function MarketValueStatistics({ analysis }: { analysis: MarketValueAnalysis }) {
+  const streak = analysis.currentStreak.direction === "flat"
+    ? "Keine laufende Serie"
+    : `${analysis.currentStreak.count}× ${analysis.currentStreak.direction === "up" ? "steigend" : "fallend"}`;
+  return (
+    <aside className="mv-statistics" aria-label="Marktwertstatistik">
+      <header><span>Statistik</span><strong>{analysis.points.length} Messpunkte</strong></header>
+      <StatRow label="Veränderung" value={`${formatSignedCurrency(analysis.totalChange)} · ${formatSignedPercent(analysis.totalChangePct)}`} toneValue={analysis.totalChange} />
+      <StatRow label="Höchstwert" value={formatCurrency(analysis.high.value)} sub={formatDate(analysis.high.date)} />
+      <StatRow label="Tiefstwert" value={formatCurrency(analysis.low.value)} sub={formatDate(analysis.low.date)} />
+      <StatRow label="Abstand zum Hoch" value={formatSignedPercent(analysis.distanceFromHighPct)} toneValue={analysis.distanceFromHighPct} />
+      <StatRow label="Durchschnitt" value={formatCurrency(Math.round(analysis.averageValue))} />
+      <StatRow label="Ø je Messung" value={formatSignedCurrency(Math.round(analysis.averageChange))} toneValue={analysis.averageChange} />
+      <StatRow label="Steigend / fallend" value={`${analysis.upDays} / ${analysis.downDays}`} />
+      <StatRow label="Aktuelle Serie" value={streak} toneValue={analysis.currentStreak.direction === "up" ? 1 : analysis.currentStreak.direction === "down" ? -1 : 0} />
+      <StatRow label="Längste Serie" value={`↑ ${analysis.longestUpStreak} · ↓ ${analysis.longestDownStreak}`} />
+      <StatRow label="Bester Tag" value={analysis.bestDay ? formatSignedCurrency(analysis.bestDay.change) : "—"} sub={analysis.bestDay ? formatDate(analysis.bestDay.date) : undefined} toneValue={1} />
+      <StatRow label="Schlechtester Tag" value={analysis.worstDay ? formatSignedCurrency(analysis.worstDay.change) : "—"} sub={analysis.worstDay ? formatDate(analysis.worstDay.date) : undefined} toneValue={-1} />
+      <StatRow label="Schwankung" value={`± ${formatNumber(analysis.volatilityPct, 1)} %`} sub="Standardabweichung der Änderungen" />
+    </aside>
+  );
+}
+
+function StatRow({ label, value, sub, toneValue }: { label: string; value: string; sub?: string; toneValue?: number }) {
+  return <div className="mv-statistics__row"><span>{label}</span><div><strong className={toneValue == null ? undefined : `tone-${tone(toneValue)}`}>{value}</strong>{sub ? <small>{sub}</small> : null}</div></div>;
+}
+
+function RecentMarketValues({ changes }: { changes: MarketValueChange[] }) {
+  const recent = changes.slice(-14).reverse();
+  if (!recent.length) return null;
+  return (
+    <div className="mv-recent">
+      <header><span>Letzte 14 Messungen</span><small>Nur tatsächlich vorhandene Tageswerte</small></header>
+      <div className="mv-recent__table-wrap">
+        <table>
+          <thead><tr><th>Datum</th><th>Marktwert</th><th>Veränderung</th><th>Prozent</th></tr></thead>
+          <tbody>{recent.map((change) => <tr key={change.date}><td>{formatDate(change.date)}</td><td>{formatCurrency(change.value)}</td><td className={`tone-${tone(change.change)}`}>{formatSignedCurrency(change.change)}</td><td className={`tone-${tone(change.changePct)}`}>{formatSignedPercent(change.changePct)}</td></tr>)}</tbody>
+        </table>
+      </div>
+    </div>
   );
 }
 
@@ -351,6 +429,57 @@ function MarketValueChart({ points }: { points: MarketValuePoint[] }) {
       <div className="mv-chart__labels"><span>{formatCurrency(min)}</span><span>{formatCurrency(max)}</span></div>
     </div>
   );
+}
+
+function TransfersSection({ transfers, available, marketValues }: { transfers: PlayerTransfer[]; available: boolean; marketValues: MarketValuePoint[] }) {
+  return (
+    <section className="player-section player-transfers">
+      <div className="player-section__heading">
+        <div><span>Transfers in der Liga</span><strong>{transfers.length ? `${transfers.length} erfasst` : "Keine erfasst"}</strong></div>
+        <small>Abgeschlossene Kickbase-Transfers</small>
+      </div>
+      {transfers.length ? (
+        <div className="player-transfers__list">
+          {transfers.map((transfer, index) => {
+            const date = transfer.date.slice(0, 10);
+            const marketValuePoint = marketValueOnOrBefore(marketValues, date);
+            const marketValue = marketValuePoint?.value ?? null;
+            const premium = marketValue == null ? null : transfer.price - marketValue;
+            const premiumPct = marketValue != null && marketValue > 0 && premium != null ? premium / marketValue * 100 : null;
+            return (
+              <article className="player-transfer" key={`${transfer.managerId ?? "kickbase"}-${transfer.date}-${transfer.price}-${index}`}>
+                <span className="player-transfer__avatar">{(transfer.managerName ?? "K").slice(0, 1).toUpperCase()}</span>
+                <div className="player-transfer__owner">
+                  <span>Wechsel zu</span>
+                  <strong>{transfer.managerName ?? "Kickbase / unbekannt"}</strong>
+                  <small>{formatDate(date)}</small>
+                </div>
+                <div className="player-transfer__price">
+                  <strong>{formatCurrency(transfer.price)}</strong>
+                  {premium != null && premiumPct != null ? <small className={`tone-${tone(premium)}`}>{formatSignedCurrency(premium)} · {formatSignedPercent(premiumPct)} zum MW</small> : <small>MW am Transfertag nicht verfügbar</small>}
+                </div>
+              </article>
+            );
+          })}
+        </div>
+      ) : available ? (
+        <div className="player-section__empty">Kickbase liefert für diesen Spieler in der aktiven Liga keine abgeschlossenen Transfers.</div>
+      ) : (
+        <div className="player-section__empty">Die Transferhistorie konnte gerade nicht geladen werden. Die übrigen Spielerdaten bleiben verfügbar.</div>
+      )}
+    </section>
+  );
+}
+
+function marketValueOnOrBefore(points: MarketValuePoint[], date: string) {
+  let result: MarketValuePoint | null = null;
+  for (const point of points) {
+    if (point.date > date) break;
+    if (point.date <= date && point.value > 0) result = point;
+  }
+  if (!result) return null;
+  const ageMs = dateOnlyToUtcMs(date) - dateOnlyToUtcMs(result.date);
+  return ageMs >= 0 && ageMs <= 2 * 86_400_000 ? result : null;
 }
 
 function PerformanceSection({ entries, selectedDay, onSelect }: { entries: PlayerPerformanceEntry[]; selectedDay: number | null; onSelect: (day: number) => void }) {
@@ -426,7 +555,7 @@ function primaryPlayerName(name: string, firstName: string | null) {
 }
 
 function DrawerState({ error, retry, onClose }: { error: boolean; retry: () => void; onClose: () => void }) {
-  return <div className="player-detail__state"><button className="player-detail__close player-detail__close--state" onClick={onClose}><X size={19}/></button><strong>{error ? "Spieler konnte nicht geladen werden." : "Spieler wird geladen …"}</strong>{error ? <button type="button" onClick={retry}>Erneut versuchen <ChevronRight size={14}/></button> : null}</div>;
+  return <div className="player-detail__state"><button className="player-detail__back player-detail__back--state" onClick={onClose}><ArrowLeft size={17}/> Zurück</button><strong>{error ? "Spieler konnte nicht geladen werden." : "Spieler wird geladen …"}</strong>{error ? <button type="button" onClick={retry}>Erneut versuchen <ChevronRight size={14}/></button> : null}</div>;
 }
 type MetricTone = "positive" | "negative" | "neutral";
 function Metric({ label, value, subvalue, tone: metricTone = "neutral" }: { label: string; value: string; subvalue?: string; tone?: MetricTone }) { return <div><span>{label}</span><strong className={`tone-${metricTone}`}>{value}</strong>{subvalue ? <small className="player-detail__metric-sub">{subvalue}</small> : null}</div>; }
@@ -434,6 +563,7 @@ function filterPreset(points: MarketValuePoint[], label: string) { const preset 
 function tone(value: number) { return value > 0 ? "positive" : value < 0 ? "negative" : "neutral"; }
 function formatCurrency(value: number) { return new Intl.NumberFormat("de-DE", { style: "currency", currency: "EUR", maximumFractionDigits: 0 }).format(value); }
 function formatSignedCurrency(value: number) { const sign = value > 0 ? "+" : ""; const abs = Math.abs(value); if (abs >= 1_000_000) return `${sign}${(value / 1_000_000).toLocaleString("de-DE", { maximumFractionDigits: 2 })} Mio. €`; if (abs >= 1_000) return `${sign}${Math.round(value / 1_000).toLocaleString("de-DE")} Tsd. €`; return `${sign}${value.toLocaleString("de-DE")} €`; }
+function formatSignedPercent(value: number) { return `${value > 0 ? "+" : ""}${formatNumber(value, 1)} %`; }
 function formatNumber(value: number, digits = 0) { return value.toLocaleString("de-DE", { minimumFractionDigits: digits, maximumFractionDigits: digits }); }
 function formatDate(date?: string) { if (!date) return "—"; const [y,m,d] = date.split("-"); return `${d}.${m}.${y.slice(2)}`; }
 

@@ -1,14 +1,14 @@
 {
   "name": "kicktrack",
   "private": true,
-  "version": "0.8.31",
+  "version": "0.8.32",
   "type": "module",
   "scripts": {
     "dev": "vite",
     "build": "tsc && vite build",
     "preview": "vite preview",
     "tauri": "tauri",
-    "test": "node --experimental-strip-types --test test/bid-eligibility.test.mjs test/date-only.test.mjs test/market-sparkline.test.mjs",
+    "test": "node --experimental-strip-types --test test/bid-eligibility.test.mjs test/date-only.test.mjs test/fair-value-model.test.mjs test/market-sparkline.test.mjs test/market-value-analysis.test.mjs",
     "typecheck": "tsc --noEmit",
     "check": "npm test && npm run typecheck && npm run build"
   },

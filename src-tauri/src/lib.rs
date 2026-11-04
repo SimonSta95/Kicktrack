@@ -26,6 +26,7 @@ pub fn run() {
             commands::squad::league_squad,
             commands::squad::league_next_matchday,
             commands::analytics::fair_value_reference,
+            commands::analytics::fair_value_dataset,
             commands::analytics::fixture_outlook,
             commands::league::league_overview,
             commands::league::manager_squad,

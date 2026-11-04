@@ -4,7 +4,16 @@ use serde::Serialize;
 use serde_json::Value;
 use tauri::State;
 
-use crate::{kickbase::error::CommandError, state::AppState};
+use crate::{
+    kickbase::{
+        error::CommandError,
+        league::parse_league_managers,
+        market::parse_market,
+        squad::{parse_squad, PlayerPosition},
+        validation::api_id,
+    },
+    state::AppState,
+};
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -21,6 +30,236 @@ pub struct FairValueReferencePlayer {
 pub struct FairValueReferenceResponse {
     pub players: Vec<FairValueReferencePlayer>,
     pub sample_size: usize,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FairValueDatasetPlayer {
+    pub player_id: String,
+    pub name: String,
+    pub first_name: Option<String>,
+    pub position: i64,
+    pub market_value: i64,
+    pub average_points: f64,
+    pub total_points: i64,
+    pub status: i64,
+    pub owner_id: Option<String>,
+    pub owner_name: Option<String>,
+    pub owner_is_self: bool,
+    pub on_market: bool,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FairValueDatasetResponse {
+    pub players: Vec<FairValueDatasetPlayer>,
+    pub manager_count: usize,
+    pub loaded_manager_count: usize,
+    pub unavailable_manager_count: usize,
+}
+
+#[tauri::command]
+pub async fn fair_value_dataset(
+    league_id: String,
+    state: State<'_, AppState>,
+) -> Result<FairValueDatasetResponse, CommandError> {
+    let league_id = api_id(&league_id, "Liga-ID")?;
+    let token = state.active_token().await?;
+    let managers_payload = state
+        .kickbase
+        .get_json(
+            &token,
+            &format!("/v4/leagues/{league_id}/settings/managers"),
+        )
+        .await?;
+    let market_payload = state
+        .kickbase
+        .get_json(&token, &format!("/v4/leagues/{league_id}/market"))
+        .await?;
+    let managers = parse_league_managers(&managers_payload, &Value::Null);
+    let manager_count = managers.len();
+    let manager_meta = managers
+        .iter()
+        .map(|manager| (manager.id.clone(), (manager.name.clone(), manager.is_self)))
+        .collect::<HashMap<_, _>>();
+
+    let semaphore = state.player_request_limit.clone();
+    let mut tasks = tokio::task::JoinSet::new();
+    for manager in managers {
+        let manager_id = match api_id(&manager.id, "Manager-ID") {
+            Ok(manager_id) => manager_id,
+            Err(_) => continue,
+        };
+        let client = state.kickbase.clone();
+        let token = token.clone();
+        let league_id = league_id.clone();
+        let semaphore = semaphore.clone();
+        tasks.spawn(async move {
+            let result = match semaphore.acquire_owned().await {
+                Ok(_permit) => client
+                    .get_json(
+                        &token,
+                        &format!("/v4/leagues/{league_id}/managers/{manager_id}/squad"),
+                    )
+                    .await
+                    .and_then(|payload| parse_squad(&payload)),
+                Err(_) => Err(CommandError::internal(
+                    "Die Fair-Value-Datenabfrage wurde abgebrochen.",
+                )),
+            };
+            (manager_id, result)
+        });
+    }
+
+    let mut by_id = HashMap::<String, FairValueDatasetPlayer>::new();
+    let mut loaded_manager_count = 0usize;
+    while let Some(result) = tasks.join_next().await {
+        match result {
+            Ok((manager_id, Ok(squad))) => {
+                loaded_manager_count += 1;
+                let (owner_name, owner_is_self) = manager_meta
+                    .get(&manager_id)
+                    .cloned()
+                    .unwrap_or_else(|| (format!("Manager {manager_id}"), false));
+                for player in squad.players {
+                    let Some(position) = position_code(&player.position) else {
+                        continue;
+                    };
+                    let (Some(market_value), Some(average_points), Some(total_points)) = (
+                        player.market_value,
+                        player.average_points,
+                        player.points_total,
+                    ) else {
+                        continue;
+                    };
+                    if market_value <= 0
+                        || average_points <= 0.0
+                        || !average_points.is_finite()
+                        || total_points <= 0
+                    {
+                        continue;
+                    }
+                    by_id.insert(
+                        player.id.clone(),
+                        FairValueDatasetPlayer {
+                            player_id: player.id,
+                            name: player.name,
+                            first_name: player.first_name,
+                            position,
+                            market_value,
+                            average_points,
+                            total_points,
+                            status: player.status.unwrap_or(0),
+                            owner_id: Some(manager_id.clone()),
+                            owner_name: Some(owner_name.clone()),
+                            owner_is_self,
+                            on_market: false,
+                        },
+                    );
+                }
+            }
+            Ok((_manager_id, Err(_error))) => {
+                #[cfg(debug_assertions)]
+                crate::kt_debug!(
+                    "[KickTrack][DEBUG][fair-value] manager={} squad_failed={:?}",
+                    _manager_id,
+                    _error
+                );
+            }
+            Err(_error) => {
+                #[cfg(debug_assertions)]
+                crate::kt_debug!(
+                    "[KickTrack][DEBUG][fair-value] squad_task_failed={:?}",
+                    _error
+                );
+            }
+        }
+    }
+
+    let market = parse_market(&market_payload)?;
+    for entry in market.entries {
+        let Some(position) = position_code(&entry.position) else {
+            continue;
+        };
+        let (Some(market_value), Some(average_points), Some(total_points)) =
+            (entry.market_value, entry.average_points, entry.points_total)
+        else {
+            continue;
+        };
+        if market_value <= 0
+            || average_points <= 0.0
+            || !average_points.is_finite()
+            || total_points <= 0
+        {
+            continue;
+        }
+        if let Some(player) = by_id.get_mut(&entry.player_id) {
+            player.on_market = true;
+            player.market_value = market_value;
+            player.average_points = average_points;
+            player.total_points = total_points;
+            player.status = entry.status.unwrap_or(player.status);
+        } else {
+            let seller_id = entry.seller_id;
+            let (owner_name, owner_is_self) = seller_id
+                .as_ref()
+                .and_then(|id| manager_meta.get(id))
+                .cloned()
+                .map(|(name, is_self)| (Some(name), is_self))
+                .unwrap_or((entry.seller_name, false));
+            by_id.insert(
+                entry.player_id.clone(),
+                FairValueDatasetPlayer {
+                    player_id: entry.player_id,
+                    name: entry.name,
+                    first_name: entry.first_name,
+                    position,
+                    market_value,
+                    average_points,
+                    total_points,
+                    status: entry.status.unwrap_or(0),
+                    owner_id: seller_id,
+                    owner_name,
+                    owner_is_self,
+                    on_market: true,
+                },
+            );
+        }
+    }
+
+    let mut players = by_id.into_values().collect::<Vec<_>>();
+    players.sort_by(|a, b| {
+        a.position
+            .cmp(&b.position)
+            .then_with(|| b.average_points.total_cmp(&a.average_points))
+            .then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
+    });
+    let unavailable_manager_count = manager_count.saturating_sub(loaded_manager_count);
+
+    #[cfg(debug_assertions)]
+    crate::kt_debug!(
+        "[KickTrack][DEBUG][fair-value] players={} managers_loaded={}/{}",
+        players.len(),
+        loaded_manager_count,
+        manager_count
+    );
+
+    Ok(FairValueDatasetResponse {
+        players,
+        manager_count,
+        loaded_manager_count,
+        unavailable_manager_count,
+    })
+}
+
+fn position_code(position: &PlayerPosition) -> Option<i64> {
+    match position {
+        PlayerPosition::Goalkeeper => Some(1),
+        PlayerPosition::Defender => Some(2),
+        PlayerPosition::Midfielder => Some(3),
+        PlayerPosition::Forward => Some(4),
+        PlayerPosition::Unknown => None,
+    }
 }
 
 #[tauri::command]

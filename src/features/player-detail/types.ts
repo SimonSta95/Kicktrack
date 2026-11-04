@@ -48,6 +48,16 @@ export type PlayerDetailResponse = {
   player: PlayerDetail;
   marketValues: MarketValuePoint[];
   performance: PlayerPerformanceEntry[];
+  transfers: PlayerTransfer[];
+  transfersAvailable: boolean;
+};
+
+export type PlayerTransfer = {
+  managerId: string | null;
+  managerName: string | null;
+  date: string;
+  price: number;
+  transferType: number | null;
 };
 
 export type PerformanceBreakdownItem = {

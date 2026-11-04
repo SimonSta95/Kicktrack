@@ -1,6 +1,7 @@
 import { lazy, Suspense, useEffect, useState, type ReactNode } from "react";
+import { getVersion } from "@tauri-apps/api/app";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { BarChart3, ChevronDown, LogOut, ShoppingBag, Trophy, UsersRound } from "lucide-react";
+import { BadgeEuro, BarChart3, ChevronDown, LogOut, ShoppingBag, Trophy, UsersRound } from "lucide-react";
 import { useLocation, useNavigate } from "react-router-dom";
 import { BrandLogo } from "@/components/branding/BrandLogo";
 import { Button } from "@/components/ui/button";
@@ -15,17 +16,37 @@ const AccountOverviewPage = lazy(() => import("@/features/account/AccountOvervie
 const LeaguePage = lazy(() => import("@/features/league/LeaguePage").then((module) => ({ default: module.LeaguePage })));
 const SquadPage = lazy(() => import("@/features/squad/SquadPage").then((module) => ({ default: module.SquadPage })));
 const MarketPage = lazy(() => import("@/features/market/MarketPage").then((module) => ({ default: module.MarketPage })));
+const PlayerDetailPage = lazy(() => import("@/features/player-detail/PlayerDetailDrawer").then((module) => ({ default: module.PlayerDetailPage })));
+const FairValuePage = lazy(() => import("@/features/fair-value/FairValuePage").then((module) => ({ default: module.FairValuePage })));
 
 const ACTIVE_LEAGUE_KEY = "kicktrack.activeLeagueId";
 
-type Section = "overview" | "squad" | "league" | "market";
+type Section = "overview" | "squad" | "league" | "market" | "fair-value" | "player";
 
 export function AppShell() {
   const navigate = useNavigate();
   const location = useLocation();
   const queryClient = useQueryClient();
   const [selectedLeagueId, setSelectedLeagueId] = useState<string | null>(null);
-  const section: Section = location.pathname === "/squad" ? "squad" : location.pathname === "/league" ? "league" : location.pathname === "/market" ? "market" : "overview";
+  const [appVersion, setAppVersion] = useState<string | null>(null);
+  const playerRouteMatch = location.pathname.match(/^\/players\/([^/]+)$/);
+  const section: Section = playerRouteMatch ? "player" : location.pathname === "/squad" ? "squad" : location.pathname === "/league" ? "league" : location.pathname === "/market" ? "market" : location.pathname === "/fair-value" ? "fair-value" : "overview";
+  const playerId = playerRouteMatch ? decodeURIComponent(playerRouteMatch[1]) : null;
+  const playerLeagueId = section === "player" ? new URLSearchParams(location.search).get("leagueId") : null;
+
+  useEffect(() => {
+    let active = true;
+    void getVersion()
+      .then((version) => {
+        if (active) setAppVersion(version);
+      })
+      .catch(() => {
+        if (active && import.meta.env.DEV) setAppVersion("dev");
+      });
+    return () => {
+      active = false;
+    };
+  }, []);
 
   const bootstrapQuery = useQuery({
     queryKey: ["account", "bootstrap"],
@@ -36,14 +57,17 @@ export function AppShell() {
     if (!bootstrapQuery.data || selectedLeagueId) return;
 
     const rememberedLeague = localStorage.getItem(ACTIVE_LEAGUE_KEY);
+    const usableRouteLeague = playerLeagueId != null && bootstrapQuery.data.leagues.some(
+      (league) => league.id === playerLeagueId,
+    );
     const usableRememberedLeague = bootstrapQuery.data.leagues.some(
       (league) => league.id === rememberedLeague,
     );
 
     setSelectedLeagueId(
-      usableRememberedLeague ? rememberedLeague : bootstrapQuery.data.leagues[0]?.id ?? null,
+      usableRouteLeague ? playerLeagueId : usableRememberedLeague ? rememberedLeague : bootstrapQuery.data.leagues[0]?.id ?? null,
     );
-  }, [bootstrapQuery.data, selectedLeagueId]);
+  }, [bootstrapQuery.data, playerLeagueId, selectedLeagueId]);
 
   const leagueQuery = useQuery({
     queryKey: ["account", "league", selectedLeagueId],
@@ -76,6 +100,13 @@ export function AppShell() {
   function changeLeague(leagueId: string) {
     localStorage.setItem(ACTIVE_LEAGUE_KEY, leagueId);
     setSelectedLeagueId(leagueId);
+    if (section === "player" && playerId) {
+      const query = new URLSearchParams({ leagueId });
+      navigate(`/players/${encodeURIComponent(playerId)}?${query.toString()}`, {
+        replace: true,
+        state: location.state,
+      });
+    }
   }
 
   async function handleLogout() {
@@ -138,6 +169,7 @@ export function AppShell() {
             onClick={() => navigate("/league")}
           />
           <NavItem icon={<ShoppingBag size={18} />} label="Markt" active={section === "market"} onClick={() => navigate("/market")} />
+          <NavItem icon={<BadgeEuro size={18} />} label="Fair Value" active={section === "fair-value"} onClick={() => navigate("/fair-value")} />
         </nav>
 
         <div className="app-sidebar__footer">
@@ -155,6 +187,9 @@ export function AppShell() {
           <Button variant="ghost" className="app-sidebar__logout" onClick={handleLogout}>
             <LogOut size={16} /> Abmelden
           </Button>
+          <span className="app-sidebar__version" aria-label={appVersion ? `KickTrack Version ${appVersion}` : "KickTrack Version wird geladen"}>
+            Version {appVersion ?? "…"}
+          </span>
         </div>
       </aside>
 
@@ -214,6 +249,20 @@ export function AppShell() {
                 leagueId={selectedLeagueId!}
               />
             )
+          ) : section === "fair-value" && selectedLeagueId ? (
+            <FairValuePage leagueId={selectedLeagueId} />
+          ) : section === "player" && playerId && (playerLeagueId ?? selectedLeagueId) ? (
+            <PlayerDetailPage
+              request={{
+                playerId,
+                leagueId: playerLeagueId ?? selectedLeagueId!,
+                context: (location.state as { playerDetailContext?: import("@/features/player-detail/types").PlayerDetailContext } | null)?.playerDetailContext,
+              }}
+              onClose={() => {
+                const returnTo = (location.state as { playerDetailReturnTo?: string } | null)?.playerDetailReturnTo;
+                navigate(returnTo ?? "/");
+              }}
+            />
           ) : marketQuery.isLoading || !marketQuery.data ? (
             marketQuery.isError ? (
               <InlineError message={errorMessage(marketQuery.error)} retry={() => marketQuery.refetch()} />

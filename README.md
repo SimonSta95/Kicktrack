@@ -1,4 +1,4 @@
-# KickTrack 0.8.31
+# KickTrack 0.8.32
 
 Desktop-App für Kickbase auf Basis von Tauri, React und TypeScript. Das Rust-Backend kapselt Kickbase-Zugriffe, lokale Persistenz und autoritative Write-Preflights; das React-Frontend stellt Markt, Kader, Liga, Analysen und Player Detail dar.
 
@@ -14,7 +14,8 @@ Die Grafik zeigt den vereinfachten Datenfluss von der Kickbase API über das Tau
 
 - Transfermarkt mit Geboten, Verkäufen, Restzeit, Marktwert-/Punktesignalen und Budgetplaner.
 - Kader- und Ligaansichten inklusive nächstem Spieltag und Managerdetails.
-- Player Detail mit Marktwertverlauf, Punktehistorie, Fair Value, Restprogramm und Punkte-Aufschlüsselung.
+- Vollbild-Player-Detail mit Marktwertverlauf, Tagesänderungen, Zeitraumstatistik, Liga-Transfers, Punktehistorie, Fair Value, Restprogramm und Punkte-Aufschlüsselung.
+- Ligaweite Fair-Value-Analyse mit logarithmischem Marktwert-/Punkte-Diagramm, Positionskurven, ±25-%-Band und Markt-/Kaderfiltern.
 - Markt- und Kadertabellen mit direkt sichtbarem MW-Verlauf und aktueller Spieltagsform.
 - Lokale SQLite-Persistenz für historische Daten, Transfers, Portraits und Analytics.
 - Gebote werden doppelt geprüft: lokaler Frontend-Preflight für Feedback und autoritativer Rust-Preflight direkt vor dem Kickbase-Write.
@@ -43,6 +44,16 @@ cargo test --manifest-path src-tauri/Cargo.toml
 
 `npm test` verwendet den eingebauten Node-Test-Runner und benötigt keine zusätzliche Test-Library.
 
+## Portable Windows-Version
+
+Eine eigenständige Release-EXE mit eingebettetem Frontend wird über die Tauri-CLI gebaut und anschließend gezippt:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\build-portable.ps1
+```
+
+Das Ergebnis liegt als `KickTrack-0.8.32-portable.zip` im Projektverzeichnis. Ein direktes `cargo build --release` reicht nicht aus, weil dabei Tauri ohne sein Release-`custom-protocol` gebaut werden kann und die Anwendung anschließend fälschlich `localhost` aufruft.
+
 ## Architektur
 
 - `src/features/*`: fachlich geschnittene React-Features.
@@ -58,6 +69,13 @@ Kickbase-spezifische Defaultregeln wie Kaderlimit und Kreditquote sind pro Runti
 
 ## Changelog
 
+### 0.8.32
+
+- Fair-Value-Seite mit ligaweiter Datenbasis aus allen Managerkadern und dem Transfermarkt ergänzt; die Kaderabfragen laufen begrenzt parallel und Teilausfälle werden sichtbar ausgewiesen.
+- Positionsabhängige Fair-Value-Kurven, logarithmisches Marktwert-/Punkte-Diagramm, ±25-%-Bewertung sowie Positions-, Markt-, Kader- und Fitnessfilter ergänzt.
+- Vollbild-Player-Detail um Marktwert-Tagesänderungen, Zeitraumstatistik und Transfers anderer Spieler erweitert.
+- App-Version dauerhaft in der Seitenleiste sichtbar gemacht.
+
 ### 0.8.31
 
 - Dauerlogin mit proaktiver Token-Erneuerung über den Windows Credential Manager; sichere Opt-in-Voreinstellung und vollständiges Entfernen beim Logout.
@@ -69,6 +87,7 @@ Kickbase-spezifische Defaultregeln wie Kaderlimit und Kreditquote sind pro Runti
 - Lokale SQLite-Historie bleibt als Fallback erhalten und wird mit der Kickbase-Historie nach Datum zusammengeführt; Kickbase gewinnt bei überlappenden Tagen.
 - Lücken in älteren lokalen Marktwert-Snapshots führen dadurch nicht mehr zu leeren kurzen Zeiträumen; ältere lokale Daten außerhalb des 365-Tage-Fensters bleiben für „Gesamt“ erhalten.
 - Parser- und Merge-Regressionstests für die Marktwert-Historie ergänzt.
+- Player Detail als eigene Route ausgebaut; tägliche MW-Änderungen, Hoch/Tief, Serien, Schwankung, letzte Messwerte und die Kickbase-Transferhistorie der aktiven Liga ergänzt.
 
 ### 0.8.30
 

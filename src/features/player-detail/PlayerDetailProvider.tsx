@@ -1,5 +1,5 @@
-import { createContext, useCallback, useContext, useMemo, useState, type PropsWithChildren } from "react";
-import { PlayerDetailDrawer } from "./PlayerDetailDrawer";
+import { createContext, useCallback, useContext, useMemo, type PropsWithChildren } from "react";
+import { useLocation, useNavigate } from "react-router-dom";
 import type { PlayerDetailRequest } from "./types";
 
 const PlayerDetailContext = createContext<{
@@ -8,17 +8,21 @@ const PlayerDetailContext = createContext<{
 } | null>(null);
 
 export function PlayerDetailProvider({ children }: PropsWithChildren) {
-  const [request, setRequest] = useState<PlayerDetailRequest | null>(null);
-  const openPlayerDetail = useCallback((next: PlayerDetailRequest) => setRequest(next), []);
-  const closePlayerDetail = useCallback(() => setRequest(null), []);
+  const navigate = useNavigate();
+  const location = useLocation();
+  const openPlayerDetail = useCallback((next: PlayerDetailRequest) => {
+    const query = new URLSearchParams({ leagueId: next.leagueId });
+    navigate(`/players/${encodeURIComponent(next.playerId)}?${query.toString()}`, {
+      state: {
+        playerDetailContext: next.context ?? null,
+        playerDetailReturnTo: `${location.pathname}${location.search}`,
+      },
+    });
+  }, [location.pathname, location.search, navigate]);
+  const closePlayerDetail = useCallback(() => navigate(-1), [navigate]);
   const value = useMemo(() => ({ openPlayerDetail, closePlayerDetail }), [openPlayerDetail, closePlayerDetail]);
 
-  return (
-    <PlayerDetailContext.Provider value={value}>
-      {children}
-      <PlayerDetailDrawer request={request} onClose={closePlayerDetail} />
-    </PlayerDetailContext.Provider>
-  );
+  return <PlayerDetailContext.Provider value={value}>{children}</PlayerDetailContext.Provider>;
 }
 
 export function usePlayerDetail() {

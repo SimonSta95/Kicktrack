@@ -11,6 +11,7 @@ use crate::{
     state::AppState,
 };
 use serde::Serialize;
+use serde_json::Value;
 use std::{
     collections::{BTreeMap, HashMap, HashSet},
     time::Duration,
@@ -29,6 +30,18 @@ pub struct PlayerDetailResponse {
     pub player: PlayerDetail,
     pub market_values: Vec<MarketValuePoint>,
     pub performance: Vec<PerformanceEntry>,
+    pub transfers: Vec<PlayerTransfer>,
+    pub transfers_available: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PlayerTransfer {
+    pub manager_id: Option<String>,
+    pub manager_name: Option<String>,
+    pub date: String,
+    pub price: i64,
+    pub transfer_type: Option<i64>,
 }
 
 #[tauri::command]
@@ -40,29 +53,17 @@ pub async fn player_detail(
     let league_id = api_id(&league_id, "Liga-ID")?;
     let player_id = api_id(&player_id, "Spieler-ID")?;
     let token = state.active_token().await?;
-    let detail_payload = state
-        .kickbase
-        .get_json(
-            &token,
-            &format!("/v4/leagues/{league_id}/players/{player_id}"),
-        )
-        .await?;
+    let detail_path = format!("/v4/leagues/{league_id}/players/{player_id}");
+    let performance_path = format!("/v4/leagues/{league_id}/players/{player_id}/performance");
+    let market_value_path = format!("/v4/leagues/{league_id}/players/{player_id}/marketValue/365");
+    let transfer_path = format!("/v4/leagues/{league_id}/players/{player_id}/transferHistory");
+    let detail_payload = state.kickbase.get_json(&token, &detail_path).await?;
     let performance_payload = state
         .kickbase
-        .get_json(
-            &token,
-            &format!("/v4/leagues/{league_id}/players/{player_id}/performance"),
-        )
+        .get_json(&token, &performance_path)
         .await
         .ok();
-    let remote_market_values = match state
-        .kickbase
-        .get_json(
-            &token,
-            &format!("/v4/leagues/{league_id}/players/{player_id}/marketValue/365"),
-        )
-        .await
-    {
+    let remote_market_values = match state.kickbase.get_json(&token, &market_value_path).await {
         Ok(payload) => parse_market_value_history(&payload),
         Err(_error) => {
             #[cfg(debug_assertions)]
@@ -71,6 +72,22 @@ pub async fn player_detail(
                 player_id, _error
             );
             Vec::new()
+        }
+    };
+    let (transfers, transfers_available) = match state
+        .kickbase
+        .get_json(&token, &transfer_path)
+        .await
+    {
+        Ok(payload) => (parse_player_transfers(&payload), true),
+        Err(_error) => {
+            #[cfg(debug_assertions)]
+            crate::kt_debug!(
+                "[KickTrack][DEBUG][player-detail] transfer history unavailable player={} error={:?}",
+                player_id,
+                _error
+            );
+            (Vec::new(), false)
         }
     };
 
@@ -117,7 +134,62 @@ pub async fn player_detail(
         player,
         market_values,
         performance,
+        transfers,
+        transfers_available,
     })
+}
+
+fn parse_player_transfers(payload: &Value) -> Vec<PlayerTransfer> {
+    let items = payload
+        .get("it")
+        .and_then(Value::as_array)
+        .or_else(|| payload.as_array())
+        .cloned()
+        .unwrap_or_default();
+    let mut transfers = items
+        .into_iter()
+        .filter_map(|item| {
+            let date = json_string(item.get("dt"))?;
+            let price = json_i64(item.get("trp"))?;
+            if date.trim().is_empty() || price <= 0 {
+                return None;
+            }
+            Some(PlayerTransfer {
+                manager_id: json_string(item.get("u")),
+                manager_name: json_string(item.get("unm")),
+                date,
+                price,
+                transfer_type: json_i64(item.get("t")),
+            })
+        })
+        .collect::<Vec<_>>();
+    transfers.sort_by(|a, b| b.date.cmp(&a.date));
+    transfers
+        .dedup_by(|a, b| a.manager_id == b.manager_id && a.date == b.date && a.price == b.price);
+    transfers
+}
+
+fn json_string(value: Option<&Value>) -> Option<String> {
+    match value? {
+        Value::String(value) => Some(value.clone()),
+        Value::Number(value) => Some(value.to_string()),
+        _ => None,
+    }
+}
+
+fn json_i64(value: Option<&Value>) -> Option<i64> {
+    match value? {
+        Value::Number(value) => value
+            .as_i64()
+            .or_else(|| value.as_f64().map(|number| number.round() as i64)),
+        Value::String(value) => value.parse::<i64>().ok().or_else(|| {
+            value
+                .parse::<f64>()
+                .ok()
+                .map(|number| number.round() as i64)
+        }),
+        _ => None,
+    }
 }
 
 fn merge_market_value_history(
@@ -171,8 +243,8 @@ pub async fn market_value_histories(
         }
         refresh_ids
     };
-    let refresh_requested = refresh_ids.len();
-    let mut refresh_succeeded = 0usize;
+    let _refresh_requested = refresh_ids.len();
+    let mut _refresh_succeeded = 0usize;
 
     if !refresh_ids.is_empty() {
         let token = state.active_token().await?;
@@ -186,7 +258,8 @@ pub async fn market_value_histories(
             tasks.spawn(async move {
                 let points = match semaphore.acquire_owned().await {
                     Ok(_permit) => {
-                        let path = format!("/v4/leagues/{league_id}/players/{player_id}/marketValue/365");
+                        let path =
+                            format!("/v4/leagues/{league_id}/players/{player_id}/marketValue/365");
                         let mut attempt = 0u32;
                         loop {
                             match client.get_json(&token, &path).await {
@@ -196,13 +269,18 @@ pub async fn market_value_histories(
                                         && matches!(error.status, Some(429) | Some(500..=599)) =>
                                 {
                                     attempt += 1;
-                                    tokio::time::sleep(Duration::from_millis(500 * u64::from(attempt))).await;
+                                    tokio::time::sleep(Duration::from_millis(
+                                        500 * u64::from(attempt),
+                                    ))
+                                    .await;
                                 }
                                 Err(error) => break Err(error),
                             }
                         }
                     }
-                    Err(_) => Err(CommandError::internal("Die Historienabfrage wurde abgebrochen.")),
+                    Err(_) => Err(CommandError::internal(
+                        "Die Historienabfrage wurde abgebrochen.",
+                    )),
                 };
                 (player_id, points)
             });
@@ -220,27 +298,24 @@ pub async fn market_value_histories(
                     );
                     remote.push((player_id, points));
                 }
-                Ok((player_id, Ok(_))) => {
+                Ok((_player_id, Ok(_))) => {
                     #[cfg(debug_assertions)]
                     crate::kt_debug!(
                         "[KickTrack][DEBUG][market-history] player={} api_points=0",
-                        player_id
+                        _player_id
                     );
                 }
-                Ok((player_id, Err(_error))) => {
+                Ok((_player_id, Err(_error))) => {
                     #[cfg(debug_assertions)]
                     crate::kt_debug!(
                         "[KickTrack][DEBUG][market-history] player={} error={:?}",
-                        player_id,
+                        _player_id,
                         _error
                     );
                 }
                 Err(_error) => {
                     #[cfg(debug_assertions)]
-                    crate::kt_debug!(
-                        "[KickTrack][DEBUG][market-history] task_error={:?}",
-                        _error
-                    );
+                    crate::kt_debug!("[KickTrack][DEBUG][market-history] task_error={:?}", _error);
                 }
             }
         }
@@ -252,7 +327,7 @@ pub async fn market_value_histories(
                     .map(|point| (point.date, point.value))
                     .collect::<Vec<_>>();
                 db.save_remote_market_value_history(&player_id, &rows)?;
-                refresh_succeeded += 1;
+                _refresh_succeeded += 1;
             }
         }
     }
@@ -274,8 +349,8 @@ pub async fn market_value_histories(
     crate::kt_debug!(
         "[KickTrack][DEBUG][market-history] players={} refresh_requested={} refresh_succeeded={}",
         result.len(),
-        refresh_requested,
-        refresh_succeeded
+        _refresh_requested,
+        _refresh_succeeded
     );
     Ok(result)
 }
@@ -325,7 +400,8 @@ pub async fn player_recent_forms(
                                     && matches!(error.status, Some(429) | Some(500..=599)) =>
                             {
                                 attempt += 1;
-                                tokio::time::sleep(Duration::from_millis(500 * u64::from(attempt))).await;
+                                tokio::time::sleep(Duration::from_millis(500 * u64::from(attempt)))
+                                    .await;
                             }
                             Err(error) => break Err(error),
                         }
@@ -455,6 +531,38 @@ mod tests {
                 MarketValuePoint {
                     date: "2026-09-18".to_owned(),
                     value: 16_700_000
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn player_transfer_history_filters_invalid_rows_and_sorts_newest_first() {
+        let payload = serde_json::json!({
+            "it": [
+                { "u": "manager-1", "unm": "Anna", "dt": "2026-09-01T20:00:00Z", "trp": 12_500_000, "t": 2 },
+                { "u": 42, "unm": "Ben", "dt": "2026-10-02T20:00:00Z", "trp": 14_000_000.0, "t": "2" },
+                { "u": "manager-3", "dt": "", "trp": 15_000_000 },
+                { "u": "manager-4", "dt": "2026-10-03T20:00:00Z", "trp": 0 }
+            ]
+        });
+
+        assert_eq!(
+            parse_player_transfers(&payload),
+            vec![
+                PlayerTransfer {
+                    manager_id: Some("42".to_owned()),
+                    manager_name: Some("Ben".to_owned()),
+                    date: "2026-10-02T20:00:00Z".to_owned(),
+                    price: 14_000_000,
+                    transfer_type: Some(2),
+                },
+                PlayerTransfer {
+                    manager_id: Some("manager-1".to_owned()),
+                    manager_name: Some("Anna".to_owned()),
+                    date: "2026-09-01T20:00:00Z".to_owned(),
+                    price: 12_500_000,
+                    transfer_type: Some(2),
                 },
             ]
         );
