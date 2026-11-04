@@ -1,5 +1,5 @@
 param(
-  [string]$OutputName = "KickTrack-0.8.32-portable.zip"
+  [string]$OutputName = "KickTrack-0.8.33-portable.zip"
 )
 
 Set-StrictMode -Version Latest

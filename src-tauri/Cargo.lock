@@ -1772,7 +1772,7 @@ dependencies = [
 
 [[package]]
 name = "kicktrack"
-version = "0.8.32"
+version = "0.8.33"
 dependencies = [
  "base64 0.22.1",
  "dirs",

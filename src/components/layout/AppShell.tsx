@@ -1,7 +1,7 @@
 import { lazy, Suspense, useEffect, useState, type ReactNode } from "react";
 import { getVersion } from "@tauri-apps/api/app";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { BadgeEuro, BarChart3, ChevronDown, LogOut, ShoppingBag, Trophy, UsersRound } from "lucide-react";
+import { BadgeEuro, BarChart3, ChevronDown, ClipboardList, LogOut, Radio, ShoppingBag, Trophy, UsersRound } from "lucide-react";
 import { useLocation, useNavigate } from "react-router-dom";
 import { BrandLogo } from "@/components/branding/BrandLogo";
 import { Button } from "@/components/ui/button";
@@ -18,10 +18,12 @@ const SquadPage = lazy(() => import("@/features/squad/SquadPage").then((module) 
 const MarketPage = lazy(() => import("@/features/market/MarketPage").then((module) => ({ default: module.MarketPage })));
 const PlayerDetailPage = lazy(() => import("@/features/player-detail/PlayerDetailDrawer").then((module) => ({ default: module.PlayerDetailPage })));
 const FairValuePage = lazy(() => import("@/features/fair-value/FairValuePage").then((module) => ({ default: module.FairValuePage })));
+const PlannerPage = lazy(() => import("@/features/planning/PlannerPage").then((module) => ({ default: module.PlannerPage })));
+const LiveMatchdayPage = lazy(() => import("@/features/live/LiveMatchdayPage").then((module) => ({ default: module.LiveMatchdayPage })));
 
 const ACTIVE_LEAGUE_KEY = "kicktrack.activeLeagueId";
 
-type Section = "overview" | "squad" | "league" | "market" | "fair-value" | "player";
+type Section = "overview" | "squad" | "planner" | "league" | "live" | "market" | "fair-value" | "player";
 
 export function AppShell() {
   const navigate = useNavigate();
@@ -30,7 +32,7 @@ export function AppShell() {
   const [selectedLeagueId, setSelectedLeagueId] = useState<string | null>(null);
   const [appVersion, setAppVersion] = useState<string | null>(null);
   const playerRouteMatch = location.pathname.match(/^\/players\/([^/]+)$/);
-  const section: Section = playerRouteMatch ? "player" : location.pathname === "/squad" ? "squad" : location.pathname === "/league" ? "league" : location.pathname === "/market" ? "market" : location.pathname === "/fair-value" ? "fair-value" : "overview";
+  const section: Section = playerRouteMatch ? "player" : location.pathname === "/squad" ? "squad" : location.pathname === "/planner" ? "planner" : location.pathname === "/league" ? "league" : location.pathname === "/live" ? "live" : location.pathname === "/market" ? "market" : location.pathname === "/fair-value" ? "fair-value" : "overview";
   const playerId = playerRouteMatch ? decodeURIComponent(playerRouteMatch[1]) : null;
   const playerLeagueId = section === "player" ? new URLSearchParams(location.search).get("leagueId") : null;
 
@@ -162,12 +164,14 @@ export function AppShell() {
             active={section === "squad"}
             onClick={() => navigate("/squad")}
           />
+          <NavItem icon={<ClipboardList size={18} />} label="Planer" active={section === "planner"} onClick={() => navigate("/planner")} />
           <NavItem
             icon={<Trophy size={18} />}
             label="Liga"
             active={section === "league"}
             onClick={() => navigate("/league")}
           />
+          <NavItem icon={<Radio size={18} />} label="Live" active={section === "live"} onClick={() => navigate("/live")} />
           <NavItem icon={<ShoppingBag size={18} />} label="Markt" active={section === "market"} onClick={() => navigate("/market")} />
           <NavItem icon={<BadgeEuro size={18} />} label="Fair Value" active={section === "fair-value"} onClick={() => navigate("/fair-value")} />
         </nav>
@@ -251,6 +255,10 @@ export function AppShell() {
             )
           ) : section === "fair-value" && selectedLeagueId ? (
             <FairValuePage leagueId={selectedLeagueId} />
+          ) : section === "planner" && selectedLeagueId ? (
+            <PlannerPage leagueId={selectedLeagueId} />
+          ) : section === "live" && selectedLeagueId ? (
+            <LiveMatchdayPage leagueId={selectedLeagueId} />
           ) : section === "player" && playerId && (playerLeagueId ?? selectedLeagueId) ? (
             <PlayerDetailPage
               request={{

@@ -19,6 +19,8 @@ export const router = createHashRouter([
   { path: "/league", element: protectedShell, errorElement: <AppRouteError /> },
   { path: "/market", element: protectedShell, errorElement: <AppRouteError /> },
   { path: "/fair-value", element: protectedShell, errorElement: <AppRouteError /> },
+  { path: "/planner", element: protectedShell, errorElement: <AppRouteError /> },
+  { path: "/live", element: protectedShell, errorElement: <AppRouteError /> },
   { path: "/players/:playerId", element: protectedShell, errorElement: <AppRouteError /> },
   { path: "/login", element: <LoginPage />, errorElement: <AppRouteError /> },
   { path: "*", element: <Navigate to="/" replace /> },

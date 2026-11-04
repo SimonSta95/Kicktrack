@@ -1,4 +1,4 @@
-# KickTrack 0.8.32
+# KickTrack 0.8.33
 
 Desktop-App für Kickbase auf Basis von Tauri, React und TypeScript. Das Rust-Backend kapselt Kickbase-Zugriffe, lokale Persistenz und autoritative Write-Preflights; das React-Frontend stellt Markt, Kader, Liga, Analysen und Player Detail dar.
 
@@ -16,12 +16,19 @@ Die Grafik zeigt den vereinfachten Datenfluss von der Kickbase API über das Tau
 - Kader- und Ligaansichten inklusive nächstem Spieltag und Managerdetails.
 - Vollbild-Player-Detail mit Marktwertverlauf, Tagesänderungen, Zeitraumstatistik, Liga-Transfers, Punktehistorie, Fair Value, Restprogramm und Punkte-Aufschlüsselung.
 - Ligaweite Fair-Value-Analyse mit logarithmischem Marktwert-/Punkte-Diagramm, Positionskurven, ±25-%-Band und Markt-/Kaderfiltern.
+- Aufstellungsplaner mit Formation, manuellen Wechseln und transparenten Expected Points aus Saisonwert, Form, Status und Heim-/Auswärtsspiel.
+- Transfer-Simulator mit Punkte-Effekt, Budgetprüfung und punkteschonender Verkaufskombination ohne automatische Kickbase-Aktion.
+- Live-Spieltag-Center mit Manager-Ranking, eigener Aufstellung und Aktualisierung alle 30 Sekunden.
 - Markt- und Kadertabellen mit direkt sichtbarem MW-Verlauf und aktueller Spieltagsform.
 - Lokale SQLite-Persistenz für historische Daten, Transfers, Portraits und Analytics.
 - Gebote werden doppelt geprüft: lokaler Frontend-Preflight für Feedback und autoritativer Rust-Preflight direkt vor dem Kickbase-Write.
 - Optionaler Dauerlogin: Nach ausdrücklicher Aktivierung liegen Zugangsdaten ausschließlich im Windows Credential Manager; KickTrack erneuert ablaufende Kickbase-Tokens vor der nächsten Anfrage.
 
 Beim normalen Login wird kein Passwort gespeichert. „Dauerhaft angemeldet bleiben“ ist standardmäßig deaktiviert und kann jederzeit durch Abmelden widerrufen werden. Weil Kickbase keine dokumentierte Refresh-Token-Schnittstelle bereitstellt, erfolgt die Erneuerung über eine neue Anmeldung mit den geschützten Zugangsdaten. Schreibende Requests werden dabei nie automatisch wiederholt.
+
+## Sicherheit des öffentlichen Repositories
+
+Sicherheitsprobleme und mögliche Credential-Leaks bitte nicht als öffentliches Issue melden. Der vorgesehene Meldeweg und die unterstützten Versionen stehen in [SECURITY.md](SECURITY.md). Die empfohlenen GitHub-Schalter für Secret Scanning, Push Protection, Actions und das Default-Branch-Ruleset sind in [docs/PUBLIC_REPOSITORY_SECURITY.md](docs/PUBLIC_REPOSITORY_SECURITY.md) dokumentiert.
 
 ## Entwicklungssetup
 
@@ -52,7 +59,7 @@ Eine eigenständige Release-EXE mit eingebettetem Frontend wird über die Tauri-
 powershell -ExecutionPolicy Bypass -File .\build-portable.ps1
 ```
 
-Das Ergebnis liegt als `KickTrack-0.8.32-portable.zip` im Projektverzeichnis. Ein direktes `cargo build --release` reicht nicht aus, weil dabei Tauri ohne sein Release-`custom-protocol` gebaut werden kann und die Anwendung anschließend fälschlich `localhost` aufruft.
+Das Ergebnis liegt als `KickTrack-0.8.33-portable.zip` im Projektverzeichnis. Ein direktes `cargo build --release` reicht nicht aus, weil dabei Tauri ohne sein Release-`custom-protocol` gebaut werden kann und die Anwendung anschließend fälschlich `localhost` aufruft.
 
 ## Architektur
 
@@ -68,6 +75,14 @@ Beim Start werden versionierte, idempotente Migrationen ausgeführt. Sie legen a
 Kickbase-spezifische Defaultregeln wie Kaderlimit und Kreditquote sind pro Runtime zentral definiert. API-Werte haben Vorrang; Defaults greifen nur, wenn Kickbase keinen Wert liefert.
 
 ## Changelog
+
+### 0.8.33
+
+- Gemeinsames Expected-Points-Modell für Aufstellungsplanung und Transfersimulation ergänzt; Berechnung und Statusabschläge bleiben sichtbar und testbar.
+- Aufstellungsplaner mit sieben Formationen, automatischer bester Elf und manuellen positionsgleichen Wechseln ergänzt.
+- Transfer-Entscheidungssimulator ergänzt: Kaufpreis, Budget, Kaderlimit, bis zu drei Verkäufe und Punkte-Effekt werden rein lesend durchgerechnet.
+- Live-Spieltag-Center mit aktuellem Manager-Ranking, optionalen Beiträgen der eigenen Aufstellung und 30-Sekunden-Aktualisierung ergänzt.
+- App- und Portable-Version auf 0.8.33 angehoben.
 
 ### 0.8.32
 
